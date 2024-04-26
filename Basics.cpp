@@ -1,20 +1,19 @@
 #include <iostream>
 using namespace std;
 
-int main()
-{
+int main(){
 
-int number, revnumber=0; 
-cout<<"enter atleast 2 digit number:"; cin >> number; //123
+int height, width;
 
-do
-{
-cout<<number<<endl;
-revnumber=(number%10+revnumber*10); // 32
-number=number/10; // 1
- 
-} while(number!=0);
+cout<<"height";cin>>height;
+cout<<"width";cin>>width;
 
-cout<< revnumber <<endl;
+for (int i = 0; i < height; i++){
+
+  for (int j = 0; j < width; j++){
+    cout<<"*";
+  }
+  cout<<endl;
+}
 
 } 

@@ -4,13 +4,17 @@ using namespace std;
 int main()
 {
 
-int number, revnumber; 
-cout<<"enter atleast 2 digit number:"; cin >> number;
+int number, revnumber=0; 
+cout<<"enter atleast 2 digit number:"; cin >> number; //123
 
-revnumber=number%10;
-number=number/10; 
+do
+{
+cout<<number<<endl;
+revnumber=(number%10+revnumber*10); // 32
+number=number/10; // 1
+ 
+} while(number!=0);
 
-cout<<number;
-cout<<revnumber;
+cout<< revnumber <<endl;
 
 } 

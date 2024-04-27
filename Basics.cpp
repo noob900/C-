@@ -12,9 +12,8 @@ cout<<"width:";cin>>width;
 cout<<"symbol:";cin>>symbol;
 cout<<"spacing:";cin>>space;
 
-for (int i = 0; i < height; i++){
-
-  for (int j = 0; j < width; j++){
+for (int i = 0; i <= height; i++){
+  for (int j = 0; j<=i; j++){
     cout<<setw(space)<<symbol;
   }
   cout<<endl;

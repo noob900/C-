@@ -1,22 +1,36 @@
 #include <iostream>
-#include <List>
+#include <list>
 using namespace std; 
 
-class person{
+class persondetails{
     
-    public:
-        string fullname;
-        int age; 
-        char home; 
-        string school; 
+    //attributes
+
     private:
         string boyfriend;
+        float salary; 
+
+    public:
+        string Fullname;
+        int Age; 
+        string Address; 
+        string School; 
+
+     //constructor
+    persondetails(std::string name,string address, string school){
+        Fullname= name;
+        Age=0;
+        Address = address;
+        School=school;
+    }
+
+
+    
 };
 
 int main(){
-    person nima; 
-    nima.fullname = "Nima palmu sherpa";
+    persondetails shishir("shishir","lappeenranta", "LUT");
 
-    cout<< "Full name of given person is:" << nima.fullname<<endl; 
-    return 0;
+    cout<< "Full name of given person is:" << shishir.Fullname<<endl; 
+
 }

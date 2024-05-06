@@ -1,13 +1,27 @@
 #include <iostream>
 #include <list>
 #include<vector>
+
 using namespace std; 
 
+
+template<typename any>
+class sizecheck{
+
+    public:
+    int totalsize;
+
+    sizecheck(vector<any> elementsofarray ){
+        totalsize=elementsofarray.size();
+        cout<<"size of the array is: "<< totalsize<<endl;
+     }
+    
+
+};
 class words{
 
 private:
     vector<char> internalsavedword;
-    int internalnumberofelement;
 
 public:
     // this is a constructor
@@ -19,20 +33,18 @@ public:
         savedword.push_back(inputword[i]);
     }  
     // prints the array list  
-    int numberofelement=savedword.size(); 
     for(const char &savedword : savedword){
         cout<<savedword;
     } 
-        
-    cout<<endl<<numberofelement<<endl;
+    cout<<endl;
+    sizecheck wordsizecheck(savedword);
     internalsavedword=savedword;
-    internalnumberofelement=numberofelement;
     };
 
     // this is a Method to reverse the word
     void reverseword(){
         vector<char> reversedword;
-        for(int i = internalnumberofelement; i >= 0; i--){
+        for(int i = internalsavedword.size(); i >= 0; i--){
             reversedword.push_back(internalsavedword[i]);
             cout<<internalsavedword[i]; 
         }
@@ -40,29 +52,51 @@ public:
 
     void orders(vector<int> ordernumber){
         
-    
       vector<char> orderletter=internalsavedword;
       for(int i = 0; i < ordernumber.size(); i++){
-          int asciiValue = static_cast<int>(orderletter[i]);
-          
-          switch(ordernumber[i]){
-                case 1: 
-                    asciiValue=asciiValue+1;
-                    orderletter[i]= static_cast<char>(asciiValue);
-                    cout<<orderletter[i]<<"---"<<asciiValue<<endl;
-                    break; 
-              
-                case -1: 
-                    asciiValue=asciiValue-1;
-                    orderletter[i]= static_cast<char>(asciiValue);
-                    cout<<orderletter[i]<<"---"<<asciiValue<<endl;
-                    break;
-          }
-
+        int asciiValue = static_cast<int>(orderletter[i]);
+        asciiValue=asciiValue+ordernumber[i];
+        orderletter[i]= static_cast<char>(asciiValue);
+        cout<<orderletter[i]<<"---"<<asciiValue<<endl;
       }  
   }
 };
 
+class number{
+    private: 
+        vector<int> integerlist;
+        int numberofelement;
+        int internalnumber;
+        
+
+    public:
+
+    number(vector<char> integers_list){
+        for(const auto &intergers : integerlist){
+            cout<< intergers << "," ; 
+        }
+        cout<<endl;
+        
+        sizecheck numbersizecheck(integers_list);
+        int repetition;
+
+        for(int i=0; i < numbersizecheck.totalsize; i++){
+            repetition=0;
+            internalnumber=integers_list[i]; //pointer
+            for(int j=0;j<numbersizecheck.totalsize; j++) {
+                if(internalnumber==integers_list[j]){
+                    repetition++;
+                }
+            } 
+
+            if(repetition>1){
+                cout<<"total repetition of " << internalnumber<< "is: " << repetition<<endl;
+            } 
+
+        }
+
+    }
+};
 
 class persondetails{
     
@@ -105,18 +139,11 @@ class persondetails{
     }
 };
 
-void printdata(void* ptr, char type){
-    switch(type){
-
-    case 'i': cout << *((int*) ptr);
-    case 'c': cout << *((char*) ptr);  
-    }
-   
-}
 
 int main(){
 
     words tweakword("hello"); 
-    tweakword.orders({1,1,1,1,1});
+    tweakword.orders({-1,2,-5,-5,-8});
+    number numbers({1,2,3,1,3,4,5,1,2,1,3,5,1});
 
 }

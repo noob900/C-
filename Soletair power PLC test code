@@ -1,0 +1,113 @@
+FUNCTION_BLOCK Air_humidifier_unit
+VAR_INPUT
+	Set_mode_manual:BOOL;
+	set_mode_auto:BOOL;
+	Contactor_OK:BOOL;
+END_VAR
+
+VAR_OUTPUT
+	Contactor:BOOL;
+	set_point_manual:REAL;
+	set_point_auto:REAL;
+END_VAR
+
+VAR
+	
+	Timer1:TON;
+	Timer2:TON;
+	Run_request_manual:BOOL;
+	Run_request_auto:BOOL;
+	istate:INT;
+END_VAR
+
+
+CASE istate OF
+	
+	0: // when switch are off  // initial phase
+        contactor:=FALSE; 
+		Timer1(in:=FALSE);
+		Timer2(in:=FALSE);
+		
+		IF Set_mode_manual THEN 
+			Set_mode_auto:=FALSE;
+			Run_request_auto:=FALSE;
+			Run_request_manual:=TRUE;
+			istate:=1;
+		END_IF
+		
+		IF Set_mode_Auto THEN 
+			Set_mode_manual:=FALSE;
+			Run_request_manual:=FALSE;
+			Run_request_auto:=TRUE;
+			istate:=2;
+		END_IF
+
+	1:  //manual mode case
+	
+	   Run_request_manual:=TRUE;
+       Contactor:=TRUE;	  //energise the contactor	 
+	   Timer1(in:=TRUE,pt:=T#5S);
+	   
+	   WHILE Timer1.Q DO //run this while loop for 5 sec if contactor is ok then move to case 3 
+		   
+	       IF timer1.ET= T#5S THEN 
+			   Timer1(in:=FALSE);
+		   END_IF
+		   
+		   IF  NOT Contactor_OK THEN 
+			   set_mode_manual:=FALSE;
+			   Run_request_manual:=FALSE;
+			   istate:=0;			 
+		   ELSE			   
+			   istate:=3;
+		   END_IF	
+	   
+	   END_WHILE;
+	   
+	      	   
+	   IF NOT set_mode_manual THEN  // if somehow switch goes off state to 0
+		   istate:=0;
+	   END_IF
+	   
+	2:  //auto mode case
+	
+	   Run_request_auto:=TRUE;
+       Contactor:=TRUE; //energise the contactor	   
+	   Timer2(in:=TRUE,pt:=T#5S);
+	   
+	   WHILE  Timer2.Q DO  //run this while loop for 5 sec if everything ok we move to case 4
+		   
+		   IF timer2.ET= T#5S THEN 
+			   Timer2(in:=FALSE);
+		   END_IF	
+	   
+		   IF  NOT Contactor_OK  THEN 
+			   set_mode_auto:=FALSE;
+			   Run_request_auto:=FALSE;
+			   istate:=0;			 
+		   ELSE
+			   istate:=4;
+		   END_IF		   
+	   END_WHILE;
+	  
+	3: //manual set point 
+		IF contactor_OK THEN 
+			set_point_manual:=600;
+		END_IF
+		
+		IF NOT set_mode_manual OR NOT contactor_ok THEN  // if somehow switch goes off state to 0
+		   istate:=0;
+		   Run_request_manual:=FALSE;
+	    END_IF
+	
+	4: 
+		IF contactor_OK THEN 
+			set_point_auto:=170;
+		END_IF
+	
+	    IF NOT set_mode_auto OR NOT contactor_ok THEN  // if somehow switch goes off state to 0
+		   istate:=0;
+		   Run_request_auto:=FALSE;
+	   END_IF
+		
+END_CASE

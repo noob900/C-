@@ -83,10 +83,12 @@ class number{
         for(int i=0; i < numbersizecheck.totalsize; i++){
             repetition=0;
             internalnumber=integers_list[i]; //pointer
+             
             for(int j=0;j<numbersizecheck.totalsize; j++) {
                 if(internalnumber==integers_list[j]){
                     repetition++;
                 }
+
             } 
 
             if(repetition>1){

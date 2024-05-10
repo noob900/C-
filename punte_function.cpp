@@ -142,10 +142,41 @@ class persondetails{
 };
 
 
-int main(){
+int getmax(int number[]){
+    int max=number[0];
+    int sizeofarray=sizeof(number);
+    
+    for(int i=0;i<sizeofarray;i++){
+        if(number[i]>max){
+            max=number[i];
+        }
+    }
 
-    words tweakword("hello"); 
-    tweakword.orders({-1,2,-5,-5,-8});
-    number numbers({1,2,3,1,3,4,5,1,2,1,3,5,1});
+    cout<< " the Largest number is "<<max;    
+    return max;
+}
+
+int getmin(int number[]){
+    int min=number[0]; // smallest integer will stay in forst address
+    int sizeofArray= sizeof(number);
+
+    for(int i=1; i<sizeofArray;i++) {
+        if(number[i]<min){
+          min=number[i];
+        }
+    }
+    
+    cout<< " the Smallest number is "<<min;
+    return min; 
+
+}
+
+
+int main(){
+    int numbers[5]={-1,2,-10,1,89};
+    cout<<numbers[8]<<endl;
+    getmin(numbers);
+    getmax(numbers);
+   
 
 }

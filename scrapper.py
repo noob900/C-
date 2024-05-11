@@ -10,18 +10,21 @@ soup = BeautifulSoup(page.content,'html')
 
 table_column=soup.find('table',class_='wikitable sortable').findAll('th')
 table_column_header=[titles.text.strip() for titles in table_column]
+table_column_data=soup.find('table',class_='wikitable sortable').findAll('tr')
+
 df=pd.DataFrame(columns=table_column_header)
 
-table_column_data=soup.find('table',class_='wikitable sortable').findAll('tr')
-print(df)
-for row in table_column_data: 
+for row in table_column_data[1:]: 
     table_row=row.find_all('td')
-    table_row_data=[titles.text.strip() for titles in table_row]
-    print(table_row_data)
+    array_size=len(table_column_data)
+    table_row_data= [titles.text.strip() for titles in table_row]
+    df.loc[len(df)]=table_row_data
     
-#for row in table_column_data: 
- #   filter=row.findAll('td')
+print(df)
+
     
+    
+
 
 
 

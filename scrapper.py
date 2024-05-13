@@ -1,3 +1,4 @@
+from operator import index
 from bs4 import BeautifulSoup
 import matplotlib.pyplot as plt
 import requests
@@ -19,7 +20,3 @@ for row in table_column_data[1:]:
        df.loc[len(df)]=table_row_data 
   
 df.to_csv('economy_of_finland.csv')  
-df=pd.read_csv('economy_of_finland.csv')  
-df.head()
-df.plot(x='Unemployment (in%)',kind='bar')
-plt.show()

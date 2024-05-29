@@ -1,25 +1,34 @@
 import pandas as pd
 import matplotlib.pyplot as plt
+import numpy as np
 
-df=pd.read_csv('economy_of_finland.csv')  
+class Plot:
+    def __init__(self, data):
+        self.df = pd.read_csv(data)
+        self.unemployment = self.df['Unemployment'].to_list()
+        self.years = self.df['Year'].to_list()
 
-gdp_values = df['GDP'].to_list()
-Unemployment=df['Unemployment'].to_list()
-years = df['Year'].to_list()
+        self.years=np.sort(self.years)
 
-fig, ax1 = plt.subplots()
+        self.fig, self.ax1 = plt.subplots()
 
+        # Plot data
+        self.ax1.plot(self.years, self.unemployment, 'o-')
 
-ax1.set_xlabel('Year')
-ax1.set_ylabel('GDP (in Bil. Euro)')
-ax1.plot(years, gdp_values, color='red')
-ax1.tick_params(axis='y')
+        # Set labels and ticks
+        self.ax1.set_ylabel('Unemployment rate (%)')
+        self.ax1.set_xlabel('Year')
 
-ax2 = ax1.twinx()
-ax2.set_ylabel('Unemployment')
-ax2.plot(years, Unemployment, color='green')
-ax2.tick_params(axis='y')
+        # Set y-axis ticks from 0 to 20, ensuring they are in ascending order
+        yticks = np.arange(0, len(self.unemployment)+1, 4)
+        self.ax1.set_yticks(yticks)
 
-plt.title('GDP and Unemployment of Finland over the Years')
-plt.grid(True)
-plt.show()
+        # Set x-axis ticks every 10 years
+        self.ax1.set_xticks(np.arange(1980, 2031, 10))
+
+        plt.title('Economy of Finland over the Years')
+        plt.show()
+
+# Usage
+if __name__ == "__main__":
+    plot = Plot('economy_of_finland.csv')

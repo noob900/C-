@@ -171,7 +171,6 @@ int getmin(int number[]){
 
 }
 
-
 int main(){
     int numbers[5]={-1,2,-10,1,89};
     cout<<numbers[8]<<endl;

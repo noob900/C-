@@ -1,0 +1,58 @@
+import pygame
+import math
+
+class Env:
+    def __init__(self,dimensions):
+        #colors
+        self.black = (0,0,0)
+        self.white = (255,255,255)
+        self.red = (255,0,0)
+        self.green = (0,255,0)
+        self.blue = (0,0,255)
+        
+        #environment dimensions
+        self.height= dimensions[0]
+        self.width= dimensions[1]
+        
+        #windows settings
+        pygame.display.set_caption("Autonomous Simulation")
+        self.screen = pygame.display.set_mode((self.width,self.height))
+        
+        
+class Robot:
+    def __init__(self,startpos,robotimg,width):
+        self.m2p=3779.52 #meters to pixels conversion
+        self.w=width
+        self.x=startpos[0]
+        self.y=startpos[1]
+        self.theta=0
+        self.vel_lateral=0.01*self.m2p #0.01 m/s
+        self.vel_radial=0.1*self.m2p #0.1 rad/s
+        self.maxspeed=0.05*self.m2p #0.05 m/s
+        self.minspeed=0.01*self.m2p #0.01 m/s
+        
+        self.image=pygame.image.load()
+        
+        
+                
+        
+        
+        
+                
+pygame.init()
+Start=(200,200)
+       
+#dimension
+dims=(600,600)
+
+running=True
+env=Env(dims)
+
+while running:
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running=False
+            
+
+pygame.display.update()
+env.map.fill(env.white)

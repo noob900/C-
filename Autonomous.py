@@ -1,10 +1,52 @@
+from pyclbr import Class
 import random
 import pygame
 import numpy as np
+import math
 
 linear_velocity_mps=0.01  #linear velocity in meters per second
 angular_velocity_mps=0.01  #angular velocity in radians per second
 
+class LIDAR:
+    
+    def __init__(self,robot_position,robot_theta,number_of_rays, Range, surface):
+        self.robot_position=robot_position
+        self.robot_theta=robot_theta
+        self.number_of_rays=number_of_rays
+        self.Range=Range
+        self.surface=pygame.display.get_surface().get_size()
+        self.w,self.h=self.surface
+        self.angles=np.linspace(0,2*np.pi,self.number_of_rays,endpoint=False)
+        
+    def sense_obstacle(self):
+        data=[]
+        Rx, Ry=self.robot_position[0], self.robot_position[1]
+        for angle in self.angles:
+            Rx1,Ry1= Rx + self.Range*np.cos(angle + self.robot_theta), Ry - self.Range*np.sin(angle + self.robot_theta)
+            for i in range(self.Range):
+                u= i/self.Range
+                x=int(Rx + u*(Rx1 - Rx))
+                y=int(Ry + u*(Ry1 - Ry)) 
+                if 0<x<self.w and 0<y<self.h:
+                    color= self.surface=pygame.display.get_surface().get_at((x,y))
+                    if color==(0,0,0,255): #black obstacle
+                        Distance=((x,y))
+                        data.append(Distance)
+                        break
+        if len(data) > 0:
+            return data
+        else:
+            return False
+        
+    def Sensor_rays(self,screen,Position,rotation):
+        n=30
+        Rx, Ry=Position
+        Center_x, Center_y=Position
+        X_axis=(Center_x + n*np.cos(rotation-45), Center_y- n*np.sin(rotation-45))
+        Y_axis=(Center_x - n*np.sin(rotation-45), Center_y - n*np.cos(rotation-45))
+        pygame.draw.line(screen,(255,0,0),(Center_x,Center_y),X_axis,2)
+        pygame.draw.line(screen,(255,0,0),(Center_x,Center_y),Y_axis,2)
+        
 class Robot:
     def __init__(self, start_position,width):
         self.m2p= 3779.52 #meters to pixels conversion factor
@@ -33,8 +75,8 @@ class Robot:
     def robot_frame(self,screen,Position,rotation):
         n=30
         Center_x, Center_y=Position
-        X_axis=(Center_x + n*np.cos(rotation), Center_y- n*np.sin(rotation))
-        Y_axis=(Center_x - n*np.sin(rotation), Center_y - n*np.cos(rotation))
+        X_axis=(Center_x + n*np.cos(rotation-45), Center_y- n*np.sin(rotation-45))
+        Y_axis=(Center_x - n*np.sin(rotation-45), Center_y - n*np.cos(rotation-45))
         pygame.draw.line(screen,(255,0,0),(Center_x,Center_y),X_axis,2)
         pygame.draw.line(screen,(0,255,0),(Center_x,Center_y),Y_axis,2)
         
@@ -45,6 +87,44 @@ class Robot:
         if self.collided:
             radius = max(8, int(self.width/4))
             pygame.draw.circle(screen, (255,0,0), (int(self.x), int(self.y)), radius, 2)
+     
+    def autonomous_control(self, lidar_data, goal_pos): 
+        dx = goal_pos[0] - self.x
+        dy = goal_pos[1] - self.y
+        goal_dist = math.hypot(dx, dy)
+        
+        if goal_dist < 5:  # If close to goal, stop
+            self.Vl, self.Vr = 0, 0
+            return
+        
+        if not lidar_data:
+            self.Vl = 10
+            self.Vr = 10
+            return
+        
+        front_rays = lidar_data[:len(lidar_data)//3]
+        front_clear = True
+        for hit in front_rays:
+            dist = math.hypot(hit[0] - self.x, hit[1] - self.y)
+            if dist < 80:
+                front_clear = False
+                break
+        
+        base_speed = 10
+        if front_clear:
+            if abs(dx) < 50:  # Goal roughly ahead/behind
+                self.Vl = base_speed
+                self.Vr = base_speed
+            elif dx > 0:  # Goal to RIGHT
+                self.Vl = base_speed * 1.2   # Turn right
+                self.Vr = base_speed * 0.7
+            else:  # Goal to LEFT
+                self.Vl = base_speed * 0.7   # Turn left
+                self.Vr = base_speed * 1.2
+        else:
+        # Obstacle ahead - turn RIGHT by default
+            self.Vl = base_speed * 0.8
+            self.Vr = -base_speed * 0.3
         
     def move(self, dt, event=None):
         self.dt=dt
@@ -59,12 +139,12 @@ class Robot:
                     
                 elif event.key == pygame.K_UP:
                     # Spin right motor faster and left motor slower to pivot left
-                    self.Vr += 0.3
+                    self.Vr += 1
                     self.Vl -= 0.1
                     
                 elif event.key == pygame.K_DOWN:
                     # Spin left motor faster and right motor slower to pivot right
-                    self.Vl += 0.3
+                    self.Vl += 1
                     self.Vr -= 0.1
                 elif event.key == pygame.K_KP_ENTER: 
                     # Cut power to both motors
@@ -120,6 +200,21 @@ class Map:
         self.text=self.font.render('Default', True, self.white, self.black)
         self.textbox=self.text.get_rect()
         self.textbox.center=(300,400) 
+        self.point_cloud=[]  # Store all LIDAR hits here
+     
+     
+    def goal_position_circle(self,screen,goal_position):
+        pygame.draw.circle(screen,(0,255,0),goal_position,5)
+            
+    def add_lidar_hits(self, hits):
+        for hit in hits:
+            if hit not in self.point_cloud:  # Avoid duplicates
+                self.point_cloud.append(hit)     
+                
+    def draw_point_cloud(self, screen):
+            for point in self.point_cloud[-1000:]:  # Last 1000 points
+                color = (100, 100)
+                pygame.draw.circle(screen, (255, 0, 0), (int(point[0]), int(point[1])), 1) 
         
     def Legend(self,linear_velocity,angular_velocity, theta):
         txt = f"V: {linear_velocity:.2f} W: {angular_velocity:.2f} theta: {theta:.2f}"
@@ -151,7 +246,7 @@ if __name__ == "__main__":
     screen=pygame.display.set_mode((500,500))
     pygame.display.set_caption("Drone Simulation")
 
-    robot = Robot((50,50),0.01)
+    robot = Robot((30,30),0.005)
     obstacles_list = objects.Generate_obstacles(20)  # Store the list of obstacles in a variable
     lasttime = pygame.time.get_ticks()
     running = True
@@ -179,13 +274,20 @@ if __name__ == "__main__":
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
-    
-        robot.move(dt, event)
+         
+        Goal_Pos = (100, 450)  # Define a fixed goal position
+        objects.goal_position_circle(screen, Goal_Pos)
         robot.collision(obstacles_list)
         robot.draw(screen)
+        sensor=LIDAR((robot.x,robot.y),robot.theta,16,100,screen.get_size())
+        Lidar_data=sensor.sense_obstacle()
+        sensor.Sensor_rays(screen,(robot.x,robot.y),robot.theta)
+        robot.autonomous_control(Lidar_data, Goal_Pos)
+        if Lidar_data:
+            objects.add_lidar_hits(Lidar_data)
+            objects.draw_point_cloud(screen)
         
-        robot.robot_frame(screen, (robot.x, robot.y), robot.theta)
-        objects.Legend(robot.Vl, robot.Vr, robot.theta)   
+         
     
         # Update THE DISPLAY
         pygame.display.update()

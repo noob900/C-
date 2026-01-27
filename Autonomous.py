@@ -44,7 +44,7 @@ class LIDAR:
         Center_x, Center_y=Position
         X_axis=(Center_x + n*np.cos(rotation-45), Center_y- n*np.sin(rotation-45))
         Y_axis=(Center_x - n*np.sin(rotation-45), Center_y - n*np.cos(rotation-45))
-        pygame.draw.line(screen,(255,0,0),(Center_x,Center_y),X_axis,2)
+        pygame.draw.line(screen,(255,0,0),(Center_x,Center_y),X_axis,2) 
         pygame.draw.line(screen,(255,0,0),(Center_x,Center_y),Y_axis,2)
         
 class Robot:
@@ -88,43 +88,67 @@ class Robot:
             radius = max(8, int(self.width/4))
             pygame.draw.circle(screen, (255,0,0), (int(self.x), int(self.y)), radius, 2)
      
-    def autonomous_control(self, lidar_data, goal_pos): 
+    def autonomous_control(self, lidar_data, goal_pos):
+        """Smart sensor-based navigation + crash recovery"""
+    
+        # CRASH RECOVERY
+        
+        # GOAL REACHED
         dx = goal_pos[0] - self.x
         dy = goal_pos[1] - self.y
         goal_dist = math.hypot(dx, dy)
-        
-        if goal_dist < 5:  # If close to goal, stop
-            self.Vl, self.Vr = 0, 0
+        if goal_dist < 10:
+            self.Vl = 0
+            self.Vr = 0
             return
-        
-        if not lidar_data:
-            self.Vl = 10
-            self.Vr = 10
-            return
-        
-        front_rays = lidar_data[:len(lidar_data)//3]
+    
+        # SMART OBSTACLE AVOIDANCE
         front_clear = True
-        for hit in front_rays:
-            dist = math.hypot(hit[0] - self.x, hit[1] - self.y)
-            if dist < 80:
-                front_clear = False
-                break
-        
-        base_speed = 10
+        if lidar_data:
+            front_rays = lidar_data[:len(lidar_data)//3]
+            for hit in front_rays:
+                if math.hypot(hit[0]-self.x, hit[1]-self.y) < 80:
+                    front_clear = False
+                    break
+    
         if front_clear:
-            if abs(dx) < 50:  # Goal roughly ahead/behind
-                self.Vl = base_speed
-                self.Vr = base_speed
-            elif dx > 0:  # Goal to RIGHT
-                self.Vl = base_speed * 1.2   # Turn right
-                self.Vr = base_speed * 0.7
-            else:  # Goal to LEFT
-                self.Vl = base_speed * 0.7   # Turn left
-                self.Vr = base_speed * 1.2
+            # NORMAL GOAL SEEKING (your PID controller)
+            K_linear = 0.1
+            K_angular = 1
+        
+            goal_angle = math.atan2(-dy, dx)
+            angle_diff = (goal_angle - self.theta + np.pi) % (2 * np.pi) - np.pi
+        
+            linear_velocity = min(K_linear * goal_dist, 30)
+            angular_velocity = K_angular * angle_diff
+        
+            self.Vl = linear_velocity - (angular_velocity * self.width / 2.0)
+            self.Vr = linear_velocity + (angular_velocity * self.width / 2.0)
         else:
-        # Obstacle ahead - turn RIGHT by default
-            self.Vl = base_speed * 0.8
-            self.Vr = -base_speed * 0.3
+            # SMART TURNING BASED ON SENSOR DATA
+            if lidar_data:
+                n = len(lidar_data)
+                left_rays = lidar_data[n//3:2*n//3]
+                right_rays = lidar_data[2*n//3:]
+            
+                left_dist = 999 if not left_rays else min(math.hypot(hit[0]-self.x, hit[1]-self.y) for hit in left_rays)
+                right_dist = 999 if not right_rays else min(math.hypot(hit[0]-self.x, hit[1]-self.y) for hit in right_rays)
+
+                if left_dist < right_dist:
+                 # LEFT more blocked → TURN RIGHT
+                    while left_dist < right_dist:
+                        self.Vl = 0
+                        self.Vr = 15
+                                            
+                if right_dist < left_dist:
+                    # RIGHT more blocked → TURN LEFT
+                    while right_dist < left_dist:
+                        self.Vl = 15
+                        self.Vr = 0
+                
+            else:
+                self.Vl = 5
+                self.Vr = 5     
         
     def move(self, dt, event=None):
         self.dt=dt
@@ -277,12 +301,13 @@ if __name__ == "__main__":
          
         Goal_Pos = (100, 450)  # Define a fixed goal position
         objects.goal_position_circle(screen, Goal_Pos)
-        robot.collision(obstacles_list)
-        robot.draw(screen)
         sensor=LIDAR((robot.x,robot.y),robot.theta,16,100,screen.get_size())
         Lidar_data=sensor.sense_obstacle()
-        sensor.Sensor_rays(screen,(robot.x,robot.y),robot.theta)
+        robot.collision(obstacles_list)
+        robot.draw(screen)
         robot.autonomous_control(Lidar_data, Goal_Pos)
+        robot.move(dt, event)
+        sensor.Sensor_rays(screen,(robot.x,robot.y),robot.theta)
         if Lidar_data:
             objects.add_lidar_hits(Lidar_data)
             objects.draw_point_cloud(screen)

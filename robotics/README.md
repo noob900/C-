@@ -19,7 +19,9 @@ This folder contains robotics simulations, control systems, and autonomous navig
 
 ## 🚀 Quick Start
 
-### Run Quadbot Simulation
+### 🛠 Visual Development Workflow
+1. **Open the URDF Preview**: Open `quadbot_custom.urdf`, press `Ctrl+Shift+P`, and run `URDF: Preview`.
+2. **Run the Simulation**:
 ```bash
 python quadbot.py
 ```

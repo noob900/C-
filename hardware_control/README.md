@@ -17,7 +17,7 @@ This folder contains scripts for controlling and interfacing with physical hardw
 
 ### Basic Usage
 ```bash
-python camera\ acess.py
+python camera_access.py
 ```
 
 ### Code Example

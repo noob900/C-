@@ -1,0 +1,118 @@
+#gyroscope sensor Theoritical model to maintain stability of robot.
+import os
+from pyclbr import Class
+import pybullet as p
+import pybullet_data
+import numpy as np
+import time 
+import itertools
+
+
+# 1. Setup the Simulation Environment
+physicsClient = p.connect(p.GUI) 
+p.setAdditionalSearchPath(pybullet_data.getDataPath()) # Path for floor/basic models
+p.setGravity(0, 0, -9.8)
+startPos = [0,0,0]
+startOrientation = p.getQuaternionFromEuler([0,0,0])
+planeId = p.loadURDF("plane.urdf",startPos,startOrientation)
+URDF_PATH = r"C:\Users\shish\C-\robotics\quadbot_custom.urdf"
+last_modified_time = os.path.getmtime(URDF_PATH)
+
+
+
+class Gyroscope:
+    def __init__(self, bias_sigma=0.01, noise_sigma=0.005):
+        # Initial constant bias (randomly chosen for this specific sensor)
+        self.bias = np.random.normal(0, bias_sigma, 3)
+        self.noise_sigma = noise_sigma
+
+    def get_reading(self, true_angular_velocity):
+        # Simulate the gyroscope reading by adding bias and noise to the true angular velocity
+        noise = np.random.normal(0, self.noise_sigma, 3)
+        return true_angular_velocity + self.bias + noise
+
+class Cordinates:
+
+    def __init__(self, x=0.0, y=0.0, z=0.0):
+        self.x = x
+        self.y = y
+        self.z = z
+
+    def __str__(self):
+        return f"({self.x}, {self.y}, {self.z})"
+
+class QuadBot:
+    def load_robot():
+
+        p.removeAllUserParameters()
+        robot_id = p.loadURDF(URDF_PATH, [0, 0, 0.3])
+        num_joints = p.getNumJoints(robot_id)
+        sliders = []
+    
+        for i in range(num_joints):
+            joint_info = p.getJointInfo(robot_id, i)
+            joint_name = joint_info[1].decode("utf-8")     
+        return robot_id
+    
+class movement: 
+    def __init__(self, robot_id):
+        self.robot_id = robot_id
+
+    def apply_gait(self, freq, amp, time_step):
+        # Simple gait pattern: sinusoidal for demonstration
+        num_joints = p.getNumJoints(self.robot_id)
+        for i in range(num_joints):
+            joint_info = p.getJointInfo(self.robot_id, i)
+            if joint_info[2] == 0:  # Revolute joint
+                target_pos = amp * np.sin(2 * np.pi * freq * time_step + i)  # Phase shift by joint index
+                p.setJointMotorControl2(self.robot_id, i, p.POSITION_CONTROL, targetPosition=target_pos) 
+
+class QuadbotMotionGenerator:
+    def __init__(self, increment=2):
+
+        self.increment = increment
+        self.num_legs = 4
+        self.joints_per_leg = 3
+        self.total_motors = 12
+
+    def get_current_joints(self, robot_id, pybullet_client):
+
+        joint_states = []
+        for i in range(pybullet_client.getNumJoints(robot_id)):
+            # We only want revolute joints (motors)
+            info = pybullet_client.getJointInfo(robot_id, i)
+            if info[2] == pybullet_client.JOINT_REVOLUTE:
+                state = pybullet_client.getJointState(robot_id, i)
+                joint_states.append(state[0]) # index 0 is position
+        return np.array(joint_states)
+
+    def generate_combinations(self, current_angles):
+
+        leg_options = [-self.increment, 0, self.increment]
+        leg_combos = list(itertools.product(leg_options, repeat=self.num_legs))
+        all_motions = []
+        for combo in leg_combos:
+            new_motion = np.copy(current_angles)
+            for leg_idx in range(self.num_legs):
+                motor_idx = leg_idx * self.joints_per_leg
+                new_motion[motor_idx] += combo[leg_idx] 
+            all_motions.append(new_motion)
+
+        return np.array(all_motions)
+
+quadbotId = QuadBot.load_robot()
+gyro = Gyroscope()
+
+while True:
+    # Check if the URDF file has been modified
+    current_modified_time = os.path.getmtime(URDF_PATH)
+    if current_modified_time > last_modified_time:
+        print("URDF change detected! Reloading...")
+        p.removeBody(quadbotId)
+        quadbotId = QuadBot.load_robot()
+        last_modified_time = current_modified_time  
+    # Read slider values and apply to joints     
+    # Step the simulation
+    p.stepSimulation()
+    time.sleep(1./240.)
+

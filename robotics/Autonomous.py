@@ -1,4 +1,3 @@
-from pyclbr import Class
 import random
 import pygame
 import numpy as np
@@ -135,16 +134,14 @@ class Robot:
                 right_dist = 999 if not right_rays else min(math.hypot(hit[0]-self.x, hit[1]-self.y) for hit in right_rays)
 
                 if left_dist < right_dist:
-                 # LEFT more blocked → TURN RIGHT
-                    while left_dist < right_dist:
-                        self.Vl = 0
-                        self.Vr = 15
+                    # LEFT more blocked → TURN RIGHT
+                    self.Vl = 0
+                    self.Vr = 15
                                             
                 if right_dist < left_dist:
                     # RIGHT more blocked → TURN LEFT
-                    while right_dist < left_dist:
-                        self.Vl = 15
-                        self.Vr = 0
+                    self.Vl = 15
+                    self.Vr = 0
                 
             else:
                 self.Vl = 5

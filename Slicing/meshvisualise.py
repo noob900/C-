@@ -1,15 +1,12 @@
 import numpy as np
+from scipy.interpolate import make_interp_spline, splprep, splev
+from scipy.interpolate import splprep, splev
 import trimesh
 
 def generate_trajectory_frames(mesh, num_points):
-    """
-    Generates robot tool frames by casting rays against the mesh surface.
-    Note: requires 'rtree' or 'pyembree' to be installed.
-    """
-    # 2. Initialize your empty list for the trajectory frames
-    trajectory_frames = []
 
-    # 3. Define the scanning resolution
+    trajectory_frames = []
+  
     bounding_box = mesh.bounds
     # We divide by 3 because we are performing 3 orthogonal scans
     res = max(2, int(np.sqrt(num_points / 3)))
@@ -19,7 +16,6 @@ def generate_trajectory_frames(mesh, num_points):
     y_grid = np.linspace(bounding_box[0][1], bounding_box[1][1], res)
     z_grid = np.linspace(bounding_box[0][2], bounding_box[1][2], res)
 
-    # 4. Define 3 orthogonal scan configurations: (Grid1, Grid2, Fixed_Axis_Index, Fixed_Value, Direction)
     # This ensures we scan from the Top, the Side, and the Front.
     scans = [
         (x_grid, y_grid, 2, bounding_box[1][2] + 5.0, [0, 0, -1]), # Top -> Down
@@ -129,8 +125,94 @@ def visualize_spheres_at_points(mesh_path, sphere_radius=1.0):
     # 4. Show the collection of spheres
     trimesh.Scene(geometries).show()
 
+
+def generate_bezier_path(mesh_path, num_points=500):
+    mesh = trimesh.load(mesh_path, force='mesh')
+    trajectory_frames = generate_trajectory_frames(mesh, 500)
+    points = np.array([frame[:3, 3] for frame in trajectory_frames])
+
+    if len(points) < 4:
+        raise ValueError("Please provide at least 4 points to create a smooth cubic curve.")
+
+    t_input = np.linspace(0, 1, len(points))
+
+    spline_engine = make_interp_spline(t_input, points, k=3) # k=3 enforces a cubic polynomial
+
+    t_dense = np.linspace(0, 1, num_points)
+
+    smooth_path = spline_engine(t_dense)
+    bezier_line = trimesh.load_path(smooth_path)
+    bezier_line.colors = [[0, 255, 0, 255]]  # Bright Green [R, G, B, Alpha]
+
+    scene = trimesh.Scene(bezier_line)
+    scene.show()
+
+
+
+def generate_smooth_layered_path(mesh_path, num_layers=30, points_per_layer=120, smoothing=0.1):
+    """
+    Generates a high-fidelity layered toolpath without showing the original mesh.
+    Uses periodic splines for perfectly smooth loop closures.
+    """
+    mesh = trimesh.load(mesh_path, force='mesh')
+    bounds = mesh.bounds
+    centroid = mesh.centroid
+    
+    # 1. Higher resolution Z-levels
+    z_levels = np.linspace(bounds[0][2], bounds[1][2], num_layers)
+    
+    # Start with an empty list (omitting the mesh) as requested
+    geometries = []
+    
+    for z in z_levels:
+        layer_hits = []
+        # 2. Increased radial resolution for better detail capture
+        # We use endpoint=False because the periodic spline handles the wrap-around
+        angles = np.linspace(0, 2 * np.pi, points_per_layer, endpoint=False)
+        radius = np.linalg.norm(bounds[1] - bounds[0]) * 1.1
+        
+        for angle in angles:
+            origin = [
+                centroid[0] + radius * np.cos(angle),
+                centroid[1] + radius * np.sin(angle),
+                z
+            ]
+            direction = [centroid[0] - origin[0], centroid[1] - origin[1], 0]
+            direction /= np.linalg.norm(direction)
+            
+            locations, _, _ = mesh.ray.intersects_location(
+                ray_origins=np.array([origin]),
+                ray_directions=np.array([direction])
+            )
+            
+            if len(locations) > 0:
+                layer_hits.append(locations[0])
+        
+        # 3. Apply Parametric Spline (splprep) for superior smoothness
+        if len(layer_hits) > 10:
+            layer_hits = np.array(layer_hits).T  # splprep expects (N_dim, N_points)
+            
+            # splprep finds a smooth parametric representation (x(u), y(u), z(u))
+            # s: smoothing factor (higher = smoother/less accurate to raw hits)
+            # per=True: ensures C2 continuity at the loop closure
+            tck, u = splprep(layer_hits, s=smoothing, per=True)
+            
+            # Evaluate the spline at high density
+            u_fine = np.linspace(0, 1, 400)
+            smooth_points = np.array(splev(u_fine, tck)).T
+            
+            # Close the loop visually
+            smooth_points = np.vstack([smooth_points, smooth_points[0]])
+            
+            path = trimesh.load_path(smooth_points)
+            path.colors = [[0, 255, 0, 255]] 
+            geometries.append(path)
+            
+    trimesh.Scene(geometries).show()
+
 if __name__ == "__main__":
     # Example usage
     mesh_path = "C:\\Users\\shish\\C-\\Slicing\\StepRobotFrames\\Adapter.stl"
     #visualize_with_trimesh(mesh_path)
-    visualize_spheres_at_points(mesh_path, sphere_radius=0.5)
+    generate_smooth_layered_path(mesh_path)
+    #visualize_spheres_at_points(mesh_path, sphere_radius=0.5)

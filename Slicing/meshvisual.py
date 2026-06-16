@@ -235,7 +235,7 @@ def visualize_spheres_at_points(mesh_path, sphere_radius=1.0):
     # 1. Generate trajectory points using the file path
     # trajectory returns (geometries, green_paths, red_paths, green_points_data, red_points_data)
     # We reduce num_layers for performance when rendering thousands of individual spheres
-    trajectory = generate_smooth_layered_path(mesh_path, num_layers=30, smoothing=0.1, line_thickness=0.04)
+    trajectory = generate_smooth_layered_path(mesh_path, num_layers=500, smoothing=0.1, line_thickness=0.03)
     green_points_list = trajectory[3] # Extract the green_points_data
 
     if not green_points_list:
@@ -266,8 +266,8 @@ def visualize_spheres_at_points(mesh_path, sphere_radius=1.0):
     trimesh.Scene(combined_spheres).show()
 
 if __name__ == "__main__":
-    mesh_path = "C:\\Users\\shish\\C-\\Slicing\\StepRobotFrames\\Adapter.stl"
+    mesh_path = r"C:\Users\shish\C-\Slicing\15778_NoveltyBust_EgyptianPharaoh_V1_NEW.obj"
     
     # Execute the library-independent geometry analyzer
     #generate_smooth_layered_path(mesh_path, num_layers=100, smoothing=0.1, line_thickness=0.04)
-    visualize_spheres_at_points(mesh_path, sphere_radius=0.1)
+    visualize_spheres_at_points(mesh_path, sphere_radius=0.01)

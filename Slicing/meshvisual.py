@@ -485,33 +485,8 @@ def generate_smooth_layered_path_from_mesh(mesh, num_layers=30, smoothing=0.1, l
                 red_normals_data.append(filtered_normals) # Store fallback normals
 
     # Create cylinder meshes for paths to give them thickness
-    path_radius = line_thickness / 2.0
-    if path_radius > 0:
-        # Manually create a circular polygon to sweep along the path
-        sections = 8
-        theta = np.linspace(0, 2 * np.pi, sections, endpoint=False)
-        vertices = np.column_stack([np.cos(theta), np.sin(theta)]) * path_radius
-        circle_polygon = trimesh.path.polygons(vertices)
-
-        if green_paths:
-            green_meshes = []
-            for p in green_paths:
-                if len(p) > 1:
-                    green_meshes.append(trimesh.path.sweep.sweep_polygon(circle_polygon, p))
-            if green_meshes:
-                path_mesh = trimesh.util.concatenate(green_meshes)
-                path_mesh.visual.face_colors = [0, 255, 0, 255] # Green
-                geometries.append(path_mesh)
-
-        if red_paths:
-            red_meshes = []
-            for p in red_paths:
-                if len(p) > 1:
-                    red_meshes.append(trimesh.path.sweep.sweep_polygon(circle_polygon, p))
-            if red_meshes:
-                fallback_mesh = trimesh.util.concatenate(red_meshes)
-                fallback_mesh.visual.face_colors = [255, 0, 0, 255] # Red
-                geometries.append(fallback_mesh)
+    # (Simplified: skip computationally expensive cylinder generation)
+    # The paths are already visualized as line data in green_paths and red_paths
 
     return geometries, green_paths, red_paths, green_points_data, red_points_data, green_normals_data, red_normals_data
 
@@ -542,9 +517,19 @@ def main():
     visualizer.visualize_coordinate_frames()
     visualizer.generate_6dof_data()
 
-    # 3. Get the final scene and show it
+    # 3. Get the final scene and save it
     final_scene = visualizer.get_scene()
-    final_scene.show()
+    
+    # Save to file instead of showing (pyglet/viewer not available in headless environment)
+    output_path = os.path.join("outputs", "visualization.gltf")
+    final_scene.export(output_path)
+    print(f"Scene saved to {output_path}")
+    
+    # Also try to show if viewer is available
+    try:
+        final_scene.show()
+    except Exception as e:
+        print(f"Viewer not available ({e}), but scene has been saved.")
 
     # Optionally print some of the generated data
     if visualizer.toolpath_data:

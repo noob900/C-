@@ -434,7 +434,7 @@ class MeshVisualizer:
             callback=show_picked_point,
             show_point=True,
             color="yellow",
-            point_size=15,
+            point_size=1,
         )
         print("Interactive point picking enabled.")
 
@@ -443,9 +443,9 @@ def main() -> None:
     visualizer = MeshVisualizer(
         mesh_path=r"C:\Users\shish\C-\Slicing\15778_NoveltyBust_EgyptianPharaoh_V1_NEW.obj",
         wcs_origin=np.array([0, 0, 0]),
-        stl_target_position=np.array([0, 0, 0]),
-        num_layers=150,
-        axis_length=10,
+        stl_target_position=np.array([10, 10, 10]),
+        num_layers=10,
+        axis_length=1,
     )
 
     visualizer.generate_path_data()

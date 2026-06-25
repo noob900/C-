@@ -31,7 +31,7 @@ C-/
 | `hardware_control/` | Hardware and webcam access | `camera acess.py` |
 | `image_processing/` | Computer vision filters and processing | `Image_processing.py` |
 | `data/` | Datasets and data examples | `economy_of_finland.csv` |
-| `mathematics/` | Mathematical modeling | `Applied_mathematics_6_2.m` |
+| `mathematics/` | Mathematical modeling |  |
 
 ## Getting Started
 

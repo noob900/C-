@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Fibbage Clone - Internet Game</title>
+    <script src="https://www.gstatic.com/firebasejs/9.0.0/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.0.0/firebase-database.js"></script>
+    <style>
+        body { font-family: Arial; max-width: 400px; margin: auto; padding: 20px; }
+        button { padding: 15px; width: 100%; margin: 10px 0; font-size: 18px; }
+        input { padding: 15px; width: 100%; margin: 10px 0; font-size: 18px; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <!-- Room Code Display/Join -->
+    <div id="roomScreen">
+        <h1>🎮 Fibbage Clone</h1>
+        <input id="roomId" placeholder="Enter Room Code" maxlength="4">
+        <input id="playerName" placeholder="Your Name">
+        <button onclick="joinRoom()">Join Game</button>
+        <button onclick="createRoom()">Create Room</button>
+    </div>
+
+    <!-- Answer Input -->
+    <div id="answerScreen" class="hidden">
+        <h2 id="question"></h2>
+        <input id="answerInput" placeholder="Type your funny answer...">
+        <button onclick="submitAnswer()">Submit</button>
+        <div id="timer">Time: 45s</div>
+    </div>
+
+    <!-- Voting Screen -->
+    <div id="votingScreen" class="hidden">
+        <h2>Vote for REAL answer!</h2>
+        <div id="answersList"></div>
+    </div>
+
+    <script>
+        // Firebase config (get from Firebase Console)
+        const firebaseConfig = {
+            // YOUR CONFIG HERE
+        };
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.database();
+
+        let currentRoom = null;
+        let playerId = null;
+
+        function createRoom() {
+            currentRoom = 'ROOM' + Math.random().toString(36).substr(2, 4).toUpperCase();
+            document.getElementById('roomId').value = currentRoom;
+            joinRoom();
+        }
+
+        function joinRoom() {
+            currentRoom = document.getElementById('roomId').value.toUpperCase();
+            playerId = Date.now().toString();
+            playerName = document.getElementById('playerName').value || 'Anonymous';
+            
+            db.ref(`rooms/${currentRoom}/players/${playerId}`).set({
+                name: playerName,
+                score: 0
+            });
+            
+            document.getElementById('roomScreen').classList.add('hidden');
+            listenToRoom();
+        }
+
+        function listenToRoom() {
+            db.ref(`rooms/${currentRoom}`).on('value', (snap) => {
+                const data = snap.val();
+                if (data && data.state === 'waiting') {
+                    showAnswerScreen(data.question);
+                } else if (data && data.state === 'voting') {
+                    showVotingScreen(data.answers);
+                }
+            });
+        }
+
+        function submitAnswer() {
+            const answer = document.getElementById('answerInput').value;
+            db.ref(`rooms/${currentRoom}/answers/${playerId}`).set(answer);
+        }
+    </script>
+</body>
+</html>

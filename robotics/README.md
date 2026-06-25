@@ -1,59 +1,55 @@
 # Robotics Projects
 
-This folder contains robotics simulations, control systems, and autonomous navigation implementations using PyBullet physics engine.
+This folder contains robotics simulations, control-system experiments, and autonomous navigation work, mainly using PyBullet.
 
-## 📁 Contents
+## Contents
 
 ### Core Projects
-- **quadbot.py** - Main quadruped robot simulation with custom URDF control interface
-- **quadbot_custom.urdf** - Custom URDF definition for the quadruped robot (3 joints per leg)
-- **Wheelrobot.py** - Wheeled robot simulation and control
-- **Autonomous.py** - Autonomous navigation and path planning implementation
 
-### Control Systems
-- **joystick.py** - Joystick/gamepad control interface for robots
-- **RRTbase.py** - Rapidly-exploring Random Tree (RRT) path planning algorithm
+- `quadbot.py` - Main quadruped robot simulation with custom URDF control.
+- `quadbot_custom.urdf` - Custom quadruped robot definition.
+- `Wheelrobot.py` - Wheeled robot simulation and control.
+- `Autonomous.py` - Autonomous navigation and path-planning experiments.
 
-### Hardware Projects
-- **Sorting-Station-PLC/** - PLC control code for industrial sorting station
+### Control and Planning
 
-## 🚀 Quick Start
+- `joystick.py` - Joystick/gamepad control interface.
+- `RRTbase.py` - Rapidly-exploring Random Tree path-planning algorithm.
+- `Robot_Stability.py` - Robot stability experiments.
 
-### 🛠 Visual Development Workflow
-1. **Open the URDF Preview**: Open `quadbot_custom.urdf`, press `Ctrl+Shift+P`, and run `URDF: Preview`.
-2. **Run the Simulation**:
+### Supporting Files
+
+- `Drone.png` - Drone-related image or diagram.
+- `GalatAnswer.html` - HTML report or generated project document.
+
+## Quick Start
+
+Run the quadruped simulation:
+
 ```bash
 python quadbot.py
 ```
-This launches the PyBullet GUI where you can control the robot using sliders.
 
-### Run Wheelrobot
+Run the wheeled robot simulation:
+
 ```bash
 python Wheelrobot.py
 ```
 
-### Use Joystick Control
+Run joystick control:
+
 ```bash
 python joystick.py
 ```
 
-## 📋 Dependencies
-- pybullet
-- numpy
-- pygame (for joystick support)
+## Dependencies
 
-## 🔧 How to Modify
+- `pybullet`
+- `numpy`
+- `pygame` for joystick support
 
-### Edit Robot URDF
-- Open `quadbot_custom.urdf` and modify link sizes, masses, or joint limits
-- Reload the simulation to see changes
+## Notes
 
-### Add New Joints
-- Duplicate a leg block in the URDF file
-- Update joint names and positions
-- Add corresponding control logic in Python script
-
-## 📝 Notes
-- Joystick requires gamepad/controller connected to system
-- RRT algorithm useful for obstacle avoidance paths
-- All simulations use PyBullet's built-in physics engine
+- Joystick scripts require a connected gamepad/controller.
+- RRT is useful for obstacle-avoidance path experiments.
+- PyBullet GUI scripts should be run from a local desktop session.

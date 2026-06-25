@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build and compiled artifacts
+build/
+dist/
+*.egg-info/
+*.exe
+*.dll
+*.pyd
+
+# Generated outputs
+outputs/
+
+# OS and editor noise
+.DS_Store
+Thumbs.db
+*.tmp
+*.log

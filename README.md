@@ -1,181 +1,115 @@
 # C- Project Portfolio
 
-A comprehensive collection of robotics, algorithms, utilities, and data science projects organized by category.
+A collection of robotics, algorithms, utilities, data, image-processing, slicing, and mathematics projects organized by topic.
 
-## 📚 Project Structure
+## Project Structure
 
-```
+```text
 C-/
-├── robotics/              # 🤖 Robot simulations and controls
-├── algorithms/            # 🔍 Problem-solving and competitive programming
-├── utilities/             # 🛠️ General-purpose utility scripts
-├── hardware_control/      # 🔌 Hardware interfacing and control
-├── image_processing/      # 🖼️ Computer vision and image analysis
-├── data/                  # 📊 Datasets and raw data
-├── mathematics/           # 📐 Mathematical modeling and computations
-├── outputs/               # 📁 Generated results and deliverables
-└── Soletair power PLC test code/  # ⚡ Industrial control systems
+|-- algorithms/            # Problem solving, C++ practice, puzzle scripts
+|-- Controls/              # Control-system experiments
+|-- data/                  # Small datasets and raw data
+|-- hardware_control/      # Camera and hardware interface experiments
+|-- image_processing/      # Computer vision and image analysis
+|-- mathematics/           # MATLAB/Octave computations
+|-- robotics/              # Robot simulations, controls, and URDF models
+|-- Slicing/               # Mesh slicing, CNC/toolpath, and CAD workflows
+|-- utilities/             # General-purpose utility scripts
+|-- outputs/               # Local generated files, ignored by Git
+`-- Soletair power PLC test code
 ```
 
-## 🎯 Quick Navigation
+## Quick Navigation
 
-| Folder | Purpose | Key Files |
-|--------|---------|-----------|
-| **robotics/** | PyBullet simulations, robot control | quadbot.py, Autonomous.py |
-| **algorithms/** | LeetCode problems, maze solving | Mazegeneration.py, leetcode1.cpp |
-| **utilities/** | Plotting, scraping, ASCII conversion | scrapper.py, class_plot.py |
-| **hardware_control/** | Webcam and device control | camera access.py |
-| **image_processing/** | CV filters, edge detection | Image_processing.py |
-| **data/** | Economic datasets and statistics | economy_of_finland.csv |
-| **mathematics/** | MATLAB/Octave computations | Applied_mathematics_6_2.m |
-| **outputs/** | Generated reports and visualizations | GalatAnswer.html, Drone.png |
+| Folder | Purpose | Key files |
+| --- | --- | --- |
+| `robotics/` | Robot simulation, navigation, and controls | `quadbot.py`, `Autonomous.py`, `RRTbase.py` |
+| `Slicing/` | Mesh visualization and toolpath generation | `meshvisual.py`, `CNCtoolpath.py` |
+| `Slicing/StepRobotFrames/` | CAD-to-robot-frame tooling | `step_to_robot_frames.py`, `cad_processor.py` |
+| `algorithms/` | Algorithm practice and puzzle solving | `Mazegeneration.py`, `Puzzlesolve.py` |
+| `utilities/` | Plotting, scraping, calculators, ASCII media | `scrapper.py`, `class_plot.py` |
+| `hardware_control/` | Hardware and webcam access | `camera acess.py` |
+| `image_processing/` | Computer vision filters and processing | `Image_processing.py` |
+| `data/` | Datasets and data examples | `economy_of_finland.csv` |
+| `mathematics/` | Mathematical modeling | `Applied_mathematics_6_2.m` |
 
-## 🚀 Getting Started
+## Getting Started
 
-### Installation & Setup
+### Installation
 
-1. **Clone the repository**
-   ```bash
-   git clone <your-repo-url>
-   cd C-
-   ```
+```bash
+git clone <your-repo-url>
+cd C-
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install pybullet numpy opencv-python matplotlib pandas pygame
+```
 
-2. **Set up Python environment**
-   ```bash
-   python -m venv .venv
-   .\.venv\Scripts\activate  # Windows
-   source .venv/bin/activate # Linux/Mac
-   ```
+For the CAD/toolpath workflow:
 
-3. **Install dependencies**
-   ```bash
-   pip install pybullet numpy opencv-python matplotlib pandas pygame
-   ```
+```bash
+pip install -r Slicing/StepRobotFrames/requirements.txt
+```
 
-### Run Your First Project
+### Run Examples
 
-**Quadbot Simulation:**
+Quadbot simulation:
+
 ```bash
 cd robotics
 python quadbot.py
 ```
 
-**Maze Solver:**
+Maze generation:
+
 ```bash
 cd algorithms
 python Mazegeneration.py
 ```
 
-**Image Processor:**
+Image processing:
+
 ```bash
 cd image_processing
 python Image_processing.py
 ```
 
-## 📋 Project Details
+## Project Details
 
-Each folder has its own `README.md` with detailed documentation. Here's what's included:
+- **Robotics:** PyBullet simulations, URDF models, autonomous navigation, and robot control.
+- **Slicing:** Mesh visualization, slicing, CNC/toolpath experiments, and CAD-to-robot-frame utilities.
+- **Algorithms:** Competitive-programming practice, maze generation, and puzzle solving.
+- **Utilities:** Data processing, plotting, web scraping, and small helper tools.
+- **Hardware control:** Camera and device interface experiments.
+- **Image processing:** Filters, edge detection, and computer-vision workflows.
+- **Data:** Small datasets and analysis examples.
+- **Mathematics:** Numerical methods and MATLAB/Octave modeling.
 
-- **Robotics:** PyBullet physics engine simulations, URDF models, autonomous navigation
-- **Algorithms:** Competitive programming, maze generation, puzzle solving
-- **Utilities:** Data processing, visualization, web scraping
-- **Hardware:** Camera control, device interfacing
-- **Image Processing:** Filters, edge detection, feature extraction
-- **Data:** Economic analysis, statistical data
-- **Mathematics:** Numerical methods, mathematical modeling
-- **Outputs:** Results, reports, visualizations
+## Tech Stack
 
-## 🔧 Tech Stack
-
-### Languages
 - Python 3.x
 - C++
 - MATLAB/Octave
 - HTML/CSS
+- PyBullet, OpenCV, NumPy, Pandas, Matplotlib, PyVista, Trimesh, CadQuery
 
-### Key Libraries
-- **PyBullet** - Robot physics simulation
-- **OpenCV** - Computer vision
-- **Pandas** - Data analysis
-- **Matplotlib** - Visualization
-- **NumPy** - Numerical computing
+## Repository Notes
 
-### Tools
-- Git & GitHub
-- VS Code
-- MATLAB/GNU Octave
-- Virtual Environment
+- Generated files belong in `outputs/` and are ignored by Git.
+- Virtual environments belong in `.venv/` and are ignored by Git.
+- Rebuild C++ executables locally instead of committing `.exe` files.
+- Python bytecode caches are ignored.
 
-## 📊 Statistics
+## Contributing
 
-- **Total Projects:** 20+
-- **Languages:** 4 (Python, C++, MATLAB, HTML)
-- **Categories:** 8
-- **Documentation:** Complete with examples
+1. Create or update the relevant project folder.
+2. Add a short `README.md` when a folder needs setup or usage notes.
+3. Keep generated outputs out of commits unless they are intentional deliverables.
+4. Test scripts locally before committing.
 
-## 🎓 Learning Resources
-
-### Robotics & Simulation
-- PyBullet Documentation: https://pybullet.org/
-- URDF Reference: http://wiki.ros.org/urdf/
-
-### Algorithms & Problem Solving
-- LeetCode: https://leetcode.com/
-- GeeksforGeeks: https://www.geeksforgeeks.org/
-
-### Computer Vision
-- OpenCV: https://opencv.org/
-- Papers With Code: https://paperswithcode.com/
-
-### Data Science
-- Pandas: https://pandas.pydata.org/
-- Scikit-learn: https://scikit-learn.org/
-
-## 📝 Contributing
-
-To add new projects:
-
-1. Create a new folder with a descriptive name
-2. Add a `README.md` with documentation
-3. Organize files by category
-4. Add your code with comments
-5. Update this main README.md
-
-## 🤝 Collaboration
-
-- Each project is self-contained
-- Use clear variable and function names
-- Write docstrings for complex functions
-- Test code before committing
-- Document dependencies
-
-## ⭐ Project Highlights
-
-### Advanced Projects
-- **Quadbot Simulation:** Custom URDF robot with joint control
-- **Autonomous Navigation:** RRT path planning algorithm
-- **Image Processing:** Comprehensive CV pipeline
-- **Web Scraper:** Efficient data collection tool
-
-### Learning Projects
-- **Algorithm Practice:** Competitive programming solutions
-- **Maze Generation:** Multiple algorithm implementations
-- **Mathematical Modeling:** Applied mathematics in MATLAB
-
-## 📞 Support & Contact
-
-For questions or contributions:
-- Check individual folder README.md files
-- Review code comments and documentation
-- Test projects locally before modifications
-
-## 📄 License
+## License
 
 This project portfolio is organized for learning and development purposes.
 
----
-
-**Last Updated:** May 9, 2026
-**Status:** Active Development
-**Organization:** 8 Categories, Fully Documented
-
+**Last updated:** June 25, 2026  
+**Status:** Active development

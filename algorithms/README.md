@@ -1,64 +1,43 @@
-# Algorithms & Problem Solving
+# Algorithms and Problem Solving
 
-This folder contains algorithm implementations, competitive programming solutions, and mathematical algorithm demonstrations.
+This folder contains algorithm implementations, competitive-programming practice, puzzle solvers, and mathematical experiments.
 
-## 📁 Contents
+## Contents
 
-### Competitive Programming (LeetCode)
-- **leetcode1.cpp** - C++ solution to LeetCode problem
-- **leetcode1.exe** - Compiled executable
+### Competitive Programming
 
-### Maze & Puzzle Solving
-- **Mazegeneration.py** - Procedural maze generation algorithms
-- **Puzzlesolve.py** - Puzzle solving algorithms and techniques
+- `leetcode1.cpp` - C++ practice solution.
 
-### Mathematical Algorithms
-- **Mathematics_CPP.cpp** - C++ implementations of mathematical algorithms
-- **punte_function.cpp** - Advanced mathematical function implementations
-- **punte_function.exe** - Compiled executable
+### Maze and Puzzle Solving
 
-## 🎯 Algorithm Categories
-
-### Maze Generation
-- Recursive backtracking
-- Depth-first search (DFS)
-- Breadth-first search (BFS)
-
-### Puzzle Solving
-- Backtracking algorithms
-- Constraint satisfaction
-- Optimization techniques
+- `Mazegeneration.py` - Procedural maze generation experiments.
+- `Puzzlesolve.py` - Puzzle-solving algorithms and techniques.
 
 ### Mathematical Algorithms
-- Number theory
-- Combinatorics
-- Advanced function computations
 
-## 💻 Usage
+- `Mathematics_CPP.cpp` - Mathematical algorithm experiments in C++.
+- `punte_function.cpp` - Function implementation and C++ practice.
 
-### Run Python Algorithms
+## Usage
+
+Run Python scripts:
+
 ```bash
 python Mazegeneration.py
 python Puzzlesolve.py
 ```
 
-### Run C++ Programs
+Compile a C++ file locally:
+
 ```bash
-.\leetcode1.exe
-.\punte_function.exe
+g++ -o leetcode1 leetcode1.cpp
+g++ -o punte_function punte_function.cpp
 ```
 
-### Compile C++ Code
-```bash
-g++ -o output_name filename.cpp
-```
+On Windows, the compiled output may be an `.exe`. Those binaries are ignored by Git and should be rebuilt locally when needed.
 
-## 📊 Performance Notes
-- C++ implementations are faster for computational tasks
-- Python versions prioritize readability and experimentation
-- All algorithms are tested and optimized
+## Notes
 
-## 🔗 Related Resources
-- LeetCode: https://leetcode.com/
-- Algorithm visualization: https://visualgo.net/
-- Time complexity reference: Big O notation
+- C++ implementations are useful for performance-sensitive experiments.
+- Python scripts prioritize readability and quick iteration.
+- Keep generated binaries and temporary outputs out of commits.

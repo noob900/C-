@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import math
+import time
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -46,6 +47,12 @@ class ToolFrame:
     x_axis: np.ndarray
     y_axis: np.ndarray
     z_axis: np.ndarray
+
+
+@dataclass
+class RobotFrame:
+    tcp: ToolFrame
+    flange: ToolFrame
 
 
 def _stack_or_empty(parts: List[np.ndarray]) -> np.ndarray:
@@ -99,6 +106,72 @@ def _axes_to_rpy(x_axis: np.ndarray, y_axis: np.ndarray, z_axis: np.ndarray) -> 
         yaw = math.atan2(-rotation[0, 1], rotation[1, 1])
 
     return math.degrees(roll), math.degrees(pitch), math.degrees(yaw)
+
+
+def _rpy_to_matrix(roll_deg: float, pitch_deg: float, yaw_deg: float) -> np.ndarray:
+    roll = math.radians(roll_deg)
+    pitch = math.radians(pitch_deg)
+    yaw = math.radians(yaw_deg)
+
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+
+    rotation_x = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, cr, -sr],
+            [0.0, sr, cr],
+        ]
+    )
+    rotation_y = np.array(
+        [
+            [cp, 0.0, sp],
+            [0.0, 1.0, 0.0],
+            [-sp, 0.0, cp],
+        ]
+    )
+    rotation_z = np.array(
+        [
+            [cy, -sy, 0.0],
+            [sy, cy, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+
+    return rotation_z @ rotation_y @ rotation_x
+
+
+def _matrix_from_axes(x_axis: np.ndarray, y_axis: np.ndarray, z_axis: np.ndarray) -> np.ndarray:
+    return np.array([x_axis, y_axis, z_axis], dtype=float).T
+
+
+def _transform_from_pose(position: np.ndarray, rotation: np.ndarray) -> np.ndarray:
+    transform = np.eye(4)
+    transform[:3, :3] = rotation
+    transform[:3, 3] = position
+    return transform
+
+
+def _transform_from_xyzabc(xyzabc: np.ndarray) -> np.ndarray:
+    x, y, z, a, b, c = np.asarray(xyzabc, dtype=float)
+    return _transform_from_pose(np.array([x, y, z]), _rpy_to_matrix(a, b, c))
+
+
+def _frame_to_transform(frame: ToolFrame) -> np.ndarray:
+    return _transform_from_pose(frame.point, _matrix_from_axes(frame.x_axis, frame.y_axis, frame.z_axis))
+
+
+def _tool_frame_from_transform(transform: np.ndarray, normal=None, tangent=None) -> ToolFrame:
+    rotation = transform[:3, :3]
+    return ToolFrame(
+        point=transform[:3, 3].copy(),
+        normal=_normalize(np.asarray(normal if normal is not None else rotation[:, 2], dtype=float)),
+        tangent=_normalize(np.asarray(tangent if tangent is not None else rotation[:, 0], dtype=float)),
+        x_axis=_normalize(rotation[:, 0]),
+        y_axis=_normalize(rotation[:, 1]),
+        z_axis=_normalize(rotation[:, 2]),
+    )
 
 
 def _axes_to_axis_angle(x_axis: np.ndarray, y_axis: np.ndarray, z_axis: np.ndarray) -> Tuple[float, float, float]:
@@ -181,6 +254,20 @@ def _build_continuous_frames(
     return frames
 
 
+def _build_robot_frames(tool_frames: List[ToolFrame], tcp_offset_xyzabc: np.ndarray) -> List[RobotFrame]:
+    flange_to_tcp = _transform_from_xyzabc(tcp_offset_xyzabc)
+    tcp_to_flange = np.linalg.inv(flange_to_tcp)
+    robot_frames: List[RobotFrame] = []
+
+    for tcp_frame in tool_frames:
+        tcp_transform = _frame_to_transform(tcp_frame)
+        flange_transform = tcp_transform @ tcp_to_flange
+        flange_frame = _tool_frame_from_transform(flange_transform)
+        robot_frames.append(RobotFrame(tcp=tcp_frame, flange=flange_frame))
+
+    return robot_frames
+
+
 def _trimesh_to_pyvista(mesh: trimesh.Trimesh) -> pv.PolyData:
     if mesh is None or mesh.is_empty:
         return pv.PolyData()
@@ -205,7 +292,7 @@ def _axis_segments(origin: np.ndarray, axes: Tuple[np.ndarray, np.ndarray, np.nd
     return [np.array([origin, origin + axis * length]) for axis in axes]
 
 
-def _axis_meshes(origin: np.ndarray, length: float, axes=None) -> List[Tuple[pv.PolyData, str, int]]:
+def _axis_meshes(origin: np.ndarray, length: float, axes=None, colors=None) -> List[Tuple[pv.PolyData, str, int]]:
     if axes is None:
         axes = (
             np.array([1.0, 0.0, 0.0]),
@@ -213,24 +300,34 @@ def _axis_meshes(origin: np.ndarray, length: float, axes=None) -> List[Tuple[pv.
             np.array([0.0, 0.0, 1.0]),
         )
 
-    colors = ["red", "green", "blue"]
+    if colors is None:
+        colors = ["red", "green", "blue"]
+
     return [
         (_line_polydata([segment]), color, 3)
         for segment, color in zip(_axis_segments(origin, axes, length), colors)
     ]
 
 
-def _sample_frame_meshes(frames: List[ToolFrame], length: float) -> List[Tuple[pv.PolyData, str, int]]:
+def _sample_frame_meshes(
+    frames: List[ToolFrame],
+    length: float,
+    colors=None,
+    width: int = 1,
+) -> List[Tuple[pv.PolyData, str, int]]:
     x_segments, y_segments, z_segments = [], [], []
     for frame in frames:
         x_segments.append(np.array([frame.point, frame.point + frame.x_axis * length]))
         y_segments.append(np.array([frame.point, frame.point + frame.y_axis * length]))
         z_segments.append(np.array([frame.point, frame.point + frame.z_axis * length]))
 
+    if colors is None:
+        colors = ["red", "green", "blue"]
+
     return [
-        (_line_polydata(x_segments), "red", 1),
-        (_line_polydata(y_segments), "green", 1),
-        (_line_polydata(z_segments), "blue", 1),
+        (_line_polydata(x_segments), colors[0], width),
+        (_line_polydata(y_segments), colors[1], width),
+        (_line_polydata(z_segments), colors[2], width),
     ]
 
 
@@ -238,6 +335,13 @@ def _add_line_meshes(plotter: pv.Plotter, meshes: List[Tuple[pv.PolyData, str, i
     for mesh, color, width in meshes:
         if mesh.n_points > 0:
             plotter.add_mesh(mesh, color=color, line_width=width)
+
+
+def _frame_axis_polydata(frame: ToolFrame, length: float) -> Tuple[pv.PolyData, pv.PolyData, pv.PolyData]:
+    return tuple(
+        _line_polydata([np.array([frame.point, frame.point + axis * length])])
+        for axis in (frame.x_axis, frame.y_axis, frame.z_axis)
+    )
 
 
 def _outer_loop_points(section) -> np.ndarray | None:
@@ -470,18 +574,27 @@ class MeshVisualizer:
         stl_target_position: np.ndarray,
         num_layers: int = 150,
         axis_length: float = 10.0,
+        tcp_offset_xyzabc: np.ndarray | None = None,
     ):
         self.mesh_path = mesh_path
         self.wcs_origin = np.asarray(wcs_origin, dtype=float)
         self.stl_target_position = np.asarray(stl_target_position, dtype=float)
         self.num_layers = num_layers
         self.axis_length = axis_length
+        self.tcp_offset_xyzabc = (
+            np.zeros(6, dtype=float)
+            if tcp_offset_xyzabc is None
+            else np.asarray(tcp_offset_xyzabc, dtype=float)
+        )
+        if self.tcp_offset_xyzabc.shape != (6,):
+            raise ValueError("tcp_offset_xyzabc must contain exactly six values: X, Y, Z, A, B, C.")
 
         self.mesh: trimesh.Trimesh | None = None
         self.points = np.empty((0, 3))
         self.normals = np.empty((0, 3))
         self.tangents = np.empty((0, 3))
         self.tool_frames: List[ToolFrame] = []
+        self.robot_frames: List[RobotFrame] = []
         self.smooth_paths: List[np.ndarray] = []
         self.fallback_paths: List[np.ndarray] = []
         self.toolpath_data: List[Dict[str, float]] = []
@@ -506,59 +619,106 @@ class MeshVisualizer:
         self.normals = path_data.normals
         self.tangents = path_data.tangents
         self.tool_frames = _build_continuous_frames(self.points, self.normals, self.tangents)
+        self.robot_frames = _build_robot_frames(self.tool_frames, self.tcp_offset_xyzabc)
         print(
             f"Generated {len(self.points)} points, {len(self.normals)} normals, "
-            f"{len(self.tangents)} tangents, and {len(self.tool_frames)} continuous frames."
+            f"{len(self.tangents)} tangents, and {len(self.robot_frames)} robot frames."
         )
 
     def generate_frames(self) -> None:
         self.frame_meshes = _axis_meshes(self.wcs_origin, self.axis_length)
         self.frame_meshes.extend(_axis_meshes(self.stl_target_position, self.axis_length * 0.5))
 
-        if not self.tool_frames:
+        if not self.robot_frames:
             return
 
-        frame_count = min(MAX_FRAME_PREVIEW_COUNT, len(self.tool_frames))
-        sample_indices = np.linspace(0, len(self.tool_frames) - 1, frame_count, dtype=int)
-        sampled_frames = [self.tool_frames[index] for index in sample_indices]
+        frame_count = min(MAX_FRAME_PREVIEW_COUNT, len(self.robot_frames))
+        sample_indices = np.linspace(0, len(self.robot_frames) - 1, frame_count, dtype=int)
+        sampled_tcp_frames = [self.robot_frames[index].tcp for index in sample_indices]
+        sampled_flange_frames = [self.robot_frames[index].flange for index in sample_indices]
         self.frame_meshes.extend(
             _sample_frame_meshes(
-                sampled_frames,
+                sampled_tcp_frames,
                 self.axis_length * 0.2,
+                colors=["red", "green", "blue"],
+            )
+        )
+        self.frame_meshes.extend(
+            _sample_frame_meshes(
+                sampled_flange_frames,
+                self.axis_length * 0.18,
+                colors=["magenta", "lime", "cyan"],
             )
         )
 
     def generate_6dof_data(self) -> None:
-        if not self.tool_frames:
-            print("Warning: no continuous frames for 6-DOF data.")
+        if not self.robot_frames:
+            print("Warning: no robot frames for 6-DOF data.")
             return
 
         self.toolpath_data = []
-        for index, frame in enumerate(self.tool_frames):
-            x, y, z = frame.point - self.wcs_origin
-            roll, pitch, yaw = _axes_to_rpy(frame.x_axis, frame.y_axis, frame.z_axis)
-            rx, ry, rz = _axes_to_axis_angle(frame.x_axis, frame.y_axis, frame.z_axis)
+        for index, robot_frame in enumerate(self.robot_frames):
+            tcp = robot_frame.tcp
+            flange = robot_frame.flange
+            tcp_x, tcp_y, tcp_z = tcp.point - self.wcs_origin
+            flange_x, flange_y, flange_z = flange.point - self.wcs_origin
+            tcp_roll, tcp_pitch, tcp_yaw = _axes_to_rpy(tcp.x_axis, tcp.y_axis, tcp.z_axis)
+            flange_roll, flange_pitch, flange_yaw = _axes_to_rpy(
+                flange.x_axis,
+                flange.y_axis,
+                flange.z_axis,
+            )
+            tcp_rx, tcp_ry, tcp_rz = _axes_to_axis_angle(tcp.x_axis, tcp.y_axis, tcp.z_axis)
+            flange_rx, flange_ry, flange_rz = _axes_to_axis_angle(
+                flange.x_axis,
+                flange.y_axis,
+                flange.z_axis,
+            )
             self.toolpath_data.append(
                 {
                     "index": index,
-                    "X": x,
-                    "Y": y,
-                    "Z": z,
-                    "A": roll,
-                    "B": pitch,
-                    "C": yaw,
-                    "Rx": rx,
-                    "Ry": ry,
-                    "Rz": rz,
-                    "x_axis_x": frame.x_axis[0],
-                    "x_axis_y": frame.x_axis[1],
-                    "x_axis_z": frame.x_axis[2],
-                    "y_axis_x": frame.y_axis[0],
-                    "y_axis_y": frame.y_axis[1],
-                    "y_axis_z": frame.y_axis[2],
-                    "z_axis_x": frame.z_axis[0],
-                    "z_axis_y": frame.z_axis[1],
-                    "z_axis_z": frame.z_axis[2],
+                    "X": tcp_x,
+                    "Y": tcp_y,
+                    "Z": tcp_z,
+                    "A": tcp_roll,
+                    "B": tcp_pitch,
+                    "C": tcp_yaw,
+                    "Rx": tcp_rx,
+                    "Ry": tcp_ry,
+                    "Rz": tcp_rz,
+                    "tcp_x": tcp_x,
+                    "tcp_y": tcp_y,
+                    "tcp_z": tcp_z,
+                    "tcp_a": tcp_roll,
+                    "tcp_b": tcp_pitch,
+                    "tcp_c": tcp_yaw,
+                    "tcp_rx": tcp_rx,
+                    "tcp_ry": tcp_ry,
+                    "tcp_rz": tcp_rz,
+                    "flange_x": flange_x,
+                    "flange_y": flange_y,
+                    "flange_z": flange_z,
+                    "flange_a": flange_roll,
+                    "flange_b": flange_pitch,
+                    "flange_c": flange_yaw,
+                    "flange_rx": flange_rx,
+                    "flange_ry": flange_ry,
+                    "flange_rz": flange_rz,
+                    "tcp_offset_x": self.tcp_offset_xyzabc[0],
+                    "tcp_offset_y": self.tcp_offset_xyzabc[1],
+                    "tcp_offset_z": self.tcp_offset_xyzabc[2],
+                    "tcp_offset_a": self.tcp_offset_xyzabc[3],
+                    "tcp_offset_b": self.tcp_offset_xyzabc[4],
+                    "tcp_offset_c": self.tcp_offset_xyzabc[5],
+                    "x_axis_x": tcp.x_axis[0],
+                    "x_axis_y": tcp.x_axis[1],
+                    "x_axis_z": tcp.x_axis[2],
+                    "y_axis_x": tcp.y_axis[0],
+                    "y_axis_y": tcp.y_axis[1],
+                    "y_axis_z": tcp.y_axis[2],
+                    "z_axis_x": tcp.z_axis[0],
+                    "z_axis_y": tcp.z_axis[1],
+                    "z_axis_z": tcp.z_axis[2],
                 }
             )
 
@@ -586,6 +746,7 @@ class MeshVisualizer:
 
         _add_line_meshes(plotter, self.frame_meshes)
         self._add_toolpaths(plotter)
+        self._add_robot_playback(plotter)
         self._add_pickable_points(plotter)
         return plotter
 
@@ -596,6 +757,102 @@ class MeshVisualizer:
         for path in self.fallback_paths:
             if len(path) > 1:
                 plotter.add_lines(path, color="red", width=2, connected=True)
+
+    def _add_robot_playback(self, plotter: pv.Plotter) -> None:
+        if not self.robot_frames:
+            return
+
+        axis_length = self.axis_length * 0.6
+        marker_radius = max(self.axis_length * 0.08, EPSILON)
+        animation_delay = 0.015
+        max_animation_steps = 1200
+        stride = max(1, len(self.robot_frames) // max_animation_steps)
+        state = {"index": 0, "playing": False}
+        actor_names = [
+            "animated_tcp_marker",
+            "animated_flange_marker",
+            "animated_tcp_x",
+            "animated_tcp_y",
+            "animated_tcp_z",
+            "animated_flange_x",
+            "animated_flange_y",
+            "animated_flange_z",
+            "animated_tcp_flange_link",
+            "animated_frame_text",
+        ]
+
+        def remove_animation_actors() -> None:
+            for name in actor_names:
+                if plotter.actors.get(name):
+                    plotter.remove_actor(name, render=False)
+
+        def add_frame_axes(frame: ToolFrame, prefix: str, colors: List[str], width: int) -> None:
+            for suffix, mesh, color in zip(("x", "y", "z"), _frame_axis_polydata(frame, axis_length), colors):
+                plotter.add_mesh(mesh, color=color, line_width=width, name=f"{prefix}_{suffix}")
+
+        def show_robot_frame(index: int) -> None:
+            robot_frame = self.robot_frames[index]
+            remove_animation_actors()
+
+            plotter.add_mesh(
+                pv.Sphere(radius=marker_radius, center=robot_frame.tcp.point),
+                color="yellow",
+                name="animated_tcp_marker",
+            )
+            plotter.add_mesh(
+                pv.Sphere(radius=marker_radius * 1.15, center=robot_frame.flange.point),
+                color="white",
+                name="animated_flange_marker",
+            )
+            add_frame_axes(robot_frame.tcp, "animated_tcp", ["red", "green", "blue"], 5)
+            add_frame_axes(robot_frame.flange, "animated_flange", ["magenta", "lime", "cyan"], 4)
+            plotter.add_mesh(
+                _line_polydata([np.array([robot_frame.flange.point, robot_frame.tcp.point])]),
+                color="white",
+                line_width=2,
+                name="animated_tcp_flange_link",
+            )
+            plotter.add_text(
+                f"Frame {index + 1}/{len(self.robot_frames)}",
+                position="upper_left",
+                font_size=10,
+                color="white",
+                name="animated_frame_text",
+            )
+            plotter.render()
+
+        def play_path(_state: bool) -> None:
+            if state["playing"]:
+                return
+
+            state["playing"] = True
+            start_index = state["index"]
+            for index in range(start_index, len(self.robot_frames), stride):
+                state["index"] = index
+                show_robot_frame(index)
+                plotter.update()
+                time.sleep(animation_delay)
+
+            state["index"] = 0
+            state["playing"] = False
+
+        show_robot_frame(0)
+        plotter.add_checkbox_button_widget(
+            play_path,
+            value=False,
+            position=(10, 10),
+            size=30,
+            color_on="lime",
+            color_off="gray",
+            background_color="black",
+        )
+        plotter.add_text(
+            "Play TCP",
+            position=(48, 14),
+            font_size=10,
+            color="white",
+            name="play_button_label",
+        )
 
     def _add_pickable_points(self, plotter: pv.Plotter) -> None:
         if len(self.points) == 0 or not self.toolpath_data:
@@ -649,6 +906,7 @@ def main() -> None:
         stl_target_position=np.array([10, 10, 10]),
         num_layers=30,
         axis_length=5,
+        tcp_offset_xyzabc=np.array([0.0, 0.0, -20.0, 0.0, 0.0, 0.0]),
     )
 
     visualizer.generate_path_data()

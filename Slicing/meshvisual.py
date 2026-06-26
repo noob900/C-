@@ -575,12 +575,14 @@ class MeshVisualizer:
         num_layers: int = 150,
         axis_length: float = 10.0,
         tcp_offset_xyzabc: np.ndarray | None = None,
+        show_flange_frames: bool = False,
     ):
         self.mesh_path = mesh_path
         self.wcs_origin = np.asarray(wcs_origin, dtype=float)
         self.stl_target_position = np.asarray(stl_target_position, dtype=float)
         self.num_layers = num_layers
         self.axis_length = axis_length
+        self.show_flange_frames = show_flange_frames
         self.tcp_offset_xyzabc = (
             np.zeros(6, dtype=float)
             if tcp_offset_xyzabc is None
@@ -643,13 +645,14 @@ class MeshVisualizer:
                 colors=["red", "green", "blue"],
             )
         )
-        self.frame_meshes.extend(
-            _sample_frame_meshes(
-                sampled_flange_frames,
-                self.axis_length * 0.18,
-                colors=["magenta", "lime", "cyan"],
+        if self.show_flange_frames:
+            self.frame_meshes.extend(
+                _sample_frame_meshes(
+                    sampled_flange_frames,
+                    self.axis_length * 0.18,
+                    colors=["magenta", "lime", "cyan"],
+                )
             )
-        )
 
     def generate_6dof_data(self) -> None:
         if not self.robot_frames:
@@ -774,12 +777,11 @@ class MeshVisualizer:
             "animated_tcp_x",
             "animated_tcp_y",
             "animated_tcp_z",
-            "animated_flange_x",
-            "animated_flange_y",
-            "animated_flange_z",
             "animated_tcp_flange_link",
             "animated_frame_text",
         ]
+        if self.show_flange_frames:
+            actor_names.extend(["animated_flange_x", "animated_flange_y", "animated_flange_z"])
 
         def remove_animation_actors() -> None:
             for name in actor_names:
@@ -805,7 +807,8 @@ class MeshVisualizer:
                 name="animated_flange_marker",
             )
             add_frame_axes(robot_frame.tcp, "animated_tcp", ["red", "green", "blue"], 5)
-            add_frame_axes(robot_frame.flange, "animated_flange", ["magenta", "lime", "cyan"], 4)
+            if self.show_flange_frames:
+                add_frame_axes(robot_frame.flange, "animated_flange", ["magenta", "lime", "cyan"], 4)
             plotter.add_mesh(
                 _line_polydata([np.array([robot_frame.flange.point, robot_frame.tcp.point])]),
                 color="white",
@@ -836,7 +839,7 @@ class MeshVisualizer:
             state["index"] = 0
             state["playing"] = False
 
-        show_robot_frame(0)
+       # show_robot_frame(0)
         plotter.add_checkbox_button_widget(
             play_path,
             value=False,
@@ -907,6 +910,7 @@ def main() -> None:
         num_layers=30,
         axis_length=5,
         tcp_offset_xyzabc=np.array([0.0, 0.0, -20.0, 0.0, 0.0, 0.0]),
+        show_flange_frames=False,
     )
 
     visualizer.generate_path_data()

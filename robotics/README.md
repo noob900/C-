@@ -10,6 +10,7 @@ This folder contains robotics simulations, control-system experiments, and auton
 - `quadbot_custom.urdf` - Custom quadruped robot definition.
 - `Wheelrobot.py` - Wheeled robot simulation and control.
 - `Autonomous.py` - Autonomous navigation and path-planning experiments.
+- `Autonomous2.py` - Maze-based autonomous search using LIDAR-style sensing without path planning.
 
 ### Control and Planning
 
@@ -40,6 +41,12 @@ Run joystick control:
 
 ```bash
 python joystick.py
+```
+
+Run the maze LIDAR search simulation:
+
+```bash
+python robotics/Autonomous2.py
 ```
 
 ## Dependencies

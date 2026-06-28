@@ -221,4 +221,4 @@ ax4.set_title("vector field + streamlines")
 # End of examples
 #
 
-plt.show(block=False)
+plt.show()

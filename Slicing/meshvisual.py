@@ -1,13 +1,14 @@
 from dataclasses import dataclass, field
 import math
-import time
 from typing import Dict, List, Tuple
 
 import numpy as np
+import pybullet as p
+import pybullet_data
 import pyvista as pv
 from scipy.interpolate import splev, splprep
-from scipy.optimize import least_squares
 import trimesh
+import vtk
 
 
 EPSILON = 1e-9
@@ -70,9 +71,11 @@ class RobotVisualSettings:
 
 @dataclass
 class SixAxisRobotConfig:
-    dh_parameters: np.ndarray
-    joint_limits_deg: np.ndarray
-    base_xyzabc: np.ndarray
+    urdf_path: str = "kuka_iiwa/model.urdf"
+    end_effector_link_name: str = "lbr_iiwa_link_7"
+    base_xyzabc: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=float))
+    home_joint_angles_deg: np.ndarray | None = None
+    scene_units_per_urdf_unit: float = 1000.0
     visuals: RobotVisualSettings = field(default_factory=RobotVisualSettings)
 
 
@@ -84,6 +87,15 @@ class SixAxisRobotPose:
     position_error: float
     rotation_error_deg: float
     success: bool
+
+
+@dataclass
+class RobotVisualMesh:
+    link_index: int
+    mesh: pv.PolyData
+    local_transform: np.ndarray
+    color: Tuple[float, float, float]
+    opacity: float
 
 
 def _stack_or_empty(parts: List[np.ndarray]) -> np.ndarray:
@@ -230,6 +242,58 @@ def _rotation_error_vector(current: np.ndarray, target: np.ndarray) -> np.ndarra
     return axis * angle
 
 
+def _quaternion_from_matrix(rotation: np.ndarray) -> Tuple[float, float, float, float]:
+    matrix = np.asarray(rotation, dtype=float)
+    trace = float(np.trace(matrix))
+
+    if trace > 0.0:
+        scale = math.sqrt(trace + 1.0) * 2.0
+        qw = 0.25 * scale
+        qx = (matrix[2, 1] - matrix[1, 2]) / scale
+        qy = (matrix[0, 2] - matrix[2, 0]) / scale
+        qz = (matrix[1, 0] - matrix[0, 1]) / scale
+    else:
+        diagonal_index = int(np.argmax(np.diag(matrix)))
+        if diagonal_index == 0:
+            scale = math.sqrt(1.0 + matrix[0, 0] - matrix[1, 1] - matrix[2, 2]) * 2.0
+            qw = (matrix[2, 1] - matrix[1, 2]) / scale
+            qx = 0.25 * scale
+            qy = (matrix[0, 1] + matrix[1, 0]) / scale
+            qz = (matrix[0, 2] + matrix[2, 0]) / scale
+        elif diagonal_index == 1:
+            scale = math.sqrt(1.0 + matrix[1, 1] - matrix[0, 0] - matrix[2, 2]) * 2.0
+            qw = (matrix[0, 2] - matrix[2, 0]) / scale
+            qx = (matrix[0, 1] + matrix[1, 0]) / scale
+            qy = 0.25 * scale
+            qz = (matrix[1, 2] + matrix[2, 1]) / scale
+        else:
+            scale = math.sqrt(1.0 + matrix[2, 2] - matrix[0, 0] - matrix[1, 1]) * 2.0
+            qw = (matrix[1, 0] - matrix[0, 1]) / scale
+            qx = (matrix[0, 2] + matrix[2, 0]) / scale
+            qy = (matrix[1, 2] + matrix[2, 1]) / scale
+            qz = 0.25 * scale
+
+    quaternion = np.array([qx, qy, qz, qw], dtype=float)
+    quaternion /= np.linalg.norm(quaternion) + EPSILON
+    return tuple(float(value) for value in quaternion)
+
+
+def _matrix_from_quaternion(quaternion: Tuple[float, float, float, float]) -> np.ndarray:
+    return np.asarray(p.getMatrixFromQuaternion(quaternion), dtype=float).reshape(3, 3)
+
+
+def _transform_from_position_quaternion(position: np.ndarray, quaternion: Tuple[float, float, float, float]) -> np.ndarray:
+    return _transform_from_pose(np.asarray(position, dtype=float), _matrix_from_quaternion(quaternion))
+
+
+def _vtk_matrix_from_numpy(transform: np.ndarray) -> vtk.vtkMatrix4x4:
+    matrix = vtk.vtkMatrix4x4()
+    for row in range(4):
+        for column in range(4):
+            matrix.SetElement(row, column, float(transform[row, column]))
+    return matrix
+
+
 def _frame_to_transform(frame: ToolFrame) -> np.ndarray:
     return _transform_from_pose(frame.point, _matrix_from_axes(frame.x_axis, frame.y_axis, frame.z_axis))
 
@@ -340,95 +404,275 @@ def _build_robot_frames(tool_frames: List[ToolFrame], tcp_offset_xyzabc: np.ndar
     return robot_frames
 
 
+def _frame_normal_alignment(frames: List[ToolFrame], normals: np.ndarray) -> Tuple[float, float]:
+    if not frames or len(normals) == 0:
+        return 0.0, 0.0
+
+    count = min(len(frames), len(normals))
+    dots = np.array(
+        [
+            float(np.dot(frames[index].z_axis, _normalize(normals[index])))
+            for index in range(count)
+        ],
+        dtype=float,
+    )
+    return float(np.min(dots)), float(np.mean(dots))
+
+
 class SixAxisRobot:
     def __init__(self, config: SixAxisRobotConfig, wcs_origin: np.ndarray):
         self.config = config
         self.base_transform = _transform_from_xyzabc(config.base_xyzabc.copy())
         self.base_transform[:3, 3] += np.asarray(wcs_origin, dtype=float)
-        self.lower_limits = np.radians(config.joint_limits_deg[:, 0])
-        self.upper_limits = np.radians(config.joint_limits_deg[:, 1])
-        self.home_angles = np.radians(
-            np.clip(np.zeros(6), config.joint_limits_deg[:, 0], config.joint_limits_deg[:, 1])
+        self.scene_units_per_urdf_unit = float(config.scene_units_per_urdf_unit)
+        self.client_id = p.connect(p.DIRECT)
+        p.setAdditionalSearchPath(pybullet_data.getDataPath(), physicsClientId=self.client_id)
+        base_quaternion = _quaternion_from_matrix(self.base_transform[:3, :3])
+        self.robot_id = p.loadURDF(
+            config.urdf_path,
+            basePosition=(self.base_transform[:3, 3] / self.scene_units_per_urdf_unit).tolist(),
+            baseOrientation=base_quaternion,
+            useFixedBase=True,
+            physicsClientId=self.client_id,
+        )
+        self.joint_indices: List[int] = []
+        self.joint_names: List[str] = []
+        lower_limits = []
+        upper_limits = []
+        rest_poses = []
+        self.end_effector_link_index = self._resolve_end_effector_link_index(config.end_effector_link_name)
+
+        for joint_index in range(p.getNumJoints(self.robot_id, physicsClientId=self.client_id)):
+            joint_info = p.getJointInfo(self.robot_id, joint_index, physicsClientId=self.client_id)
+            joint_type = joint_info[2]
+            if joint_type not in (p.JOINT_REVOLUTE, p.JOINT_PRISMATIC):
+                continue
+
+            lower_limit = float(joint_info[8])
+            upper_limit = float(joint_info[9])
+            if lower_limit >= upper_limit:
+                lower_limit, upper_limit = -math.pi, math.pi
+
+            self.joint_indices.append(joint_index)
+            self.joint_names.append(joint_info[1].decode("utf-8"))
+            lower_limits.append(lower_limit)
+            upper_limits.append(upper_limit)
+            rest_poses.append(float(np.clip(0.0, lower_limit, upper_limit)))
+
+        if not self.joint_indices:
+            raise ValueError(f"URDF '{config.urdf_path}' has no movable joints.")
+
+        self.lower_limits = np.asarray(lower_limits, dtype=float)
+        self.upper_limits = np.asarray(upper_limits, dtype=float)
+        self.joint_ranges = self.upper_limits - self.lower_limits
+        self.home_angles = np.asarray(rest_poses, dtype=float)
+        if config.home_joint_angles_deg is not None:
+            configured_home_deg = np.asarray(config.home_joint_angles_deg, dtype=float).reshape(-1)
+            configured_home = np.radians(configured_home_deg)
+            if configured_home.shape != self.home_angles.shape:
+                raise ValueError(
+                    f"home_joint_angles_deg must contain {len(self.home_angles)} values for this URDF; "
+                    f"got {len(configured_home_deg)}. Joint order: {', '.join(self.joint_names)}."
+                )
+            self.home_angles = np.clip(configured_home, self.lower_limits, self.upper_limits)
+        self._apply_joint_positions(self.home_angles)
+        self.visual_meshes = self._load_visual_meshes()
+        print(
+            f"Loaded URDF robot '{config.urdf_path}' with {len(self.joint_indices)} movable joints. "
+            f"End effector link: {self.end_effector_link_index}. "
+            f"Visual meshes: {len(self.visual_meshes)}."
         )
 
     @staticmethod
     def default_config() -> SixAxisRobotConfig:
-        return SixAxisRobotConfig(
-            # KUKA KR 120 R2700-2 from RoboDK.
-            # Modified-DH row order follows RoboDK: alpha_deg, a_mm, theta_offset_deg, d_mm.
-            dh_parameters=np.array(
-                [
-                    [0.0,   0.0,   0,       645.0],
-                    [-90.0, 330.0, 0.0,     0.0],
-                    [0.0,   1150,  -90.0,   0.0],
-                    [-90.0, 115.0, 0.0,     1220.0],
-                    [90.0,  0.0,   0.0,     0.0],
-                    [-90.0, 0.0,  180.0,    215.0],
-                ],
-                dtype=float,
-            ),
-            joint_limits_deg=np.array(
-                [
-                    [-185.0, 185.0],
-                    [-140.0, -5.0],
-                    [-120.0, 168.0],
-                    [-350.0, 350.0],
-                    [-125.0, 125.0],
-                    [-350.0, 350.0],
-                ],
-                dtype=float,
-            ),
-            base_xyzabc=np.zeros(6, dtype=float),
+        return SixAxisRobotConfig()
+
+    @property
+    def joint_limits_deg(self) -> np.ndarray:
+        return np.degrees(np.column_stack((self.lower_limits, self.upper_limits)))
+
+    def _resolve_end_effector_link_index(self, link_name: str) -> int:
+        fallback_index = p.getNumJoints(self.robot_id, physicsClientId=self.client_id) - 1
+        for joint_index in range(p.getNumJoints(self.robot_id, physicsClientId=self.client_id)):
+            joint_info = p.getJointInfo(self.robot_id, joint_index, physicsClientId=self.client_id)
+            if joint_info[12].decode("utf-8") == link_name:
+                return joint_index
+        print(f"Warning: link '{link_name}' was not found in URDF; using last link index {fallback_index}.")
+        return fallback_index
+
+    def _apply_joint_positions(self, joint_angles: np.ndarray) -> None:
+        for joint_index, joint_angle in zip(self.joint_indices, joint_angles):
+            p.resetJointState(
+                self.robot_id,
+                joint_index,
+                float(joint_angle),
+                physicsClientId=self.client_id,
+            )
+
+    def _link_transform(self, link_index: int) -> np.ndarray:
+        link_state = p.getLinkState(
+            self.robot_id,
+            link_index,
+            computeForwardKinematics=True,
+            physicsClientId=self.client_id,
         )
+        position = np.asarray(link_state[4], dtype=float)
+        position *= self.scene_units_per_urdf_unit
+        rotation = np.asarray(p.getMatrixFromQuaternion(link_state[5]), dtype=float).reshape(3, 3)
+        return _transform_from_pose(position, rotation)
+
+    def _load_visual_meshes(self) -> List[RobotVisualMesh]:
+        visual_meshes: List[RobotVisualMesh] = []
+        for visual_index, visual_shape in enumerate(
+            p.getVisualShapeData(self.robot_id, physicsClientId=self.client_id)
+        ):
+            link_index = int(visual_shape[1])
+            geometry_type = int(visual_shape[2])
+            if geometry_type != p.GEOM_MESH:
+                continue
+
+            mesh_path = visual_shape[4].decode("utf-8")
+            if not mesh_path:
+                continue
+
+            try:
+                mesh = pv.read(mesh_path)
+            except Exception as exc:
+                print(f"Warning: could not load URDF visual mesh '{mesh_path}': {exc}")
+                continue
+
+            if not isinstance(mesh, pv.PolyData):
+                mesh = mesh.extract_geometry()
+
+            mesh = mesh.copy(deep=True)
+            mesh.points *= np.asarray(visual_shape[3], dtype=float) * self.scene_units_per_urdf_unit
+            local_position = np.asarray(visual_shape[5], dtype=float) * self.scene_units_per_urdf_unit
+            local_quaternion = tuple(float(value) for value in visual_shape[6])
+            rgba = tuple(float(value) for value in visual_shape[7])
+            visual_meshes.append(
+                RobotVisualMesh(
+                    link_index=link_index,
+                    mesh=mesh,
+                    local_transform=_transform_from_position_quaternion(local_position, local_quaternion),
+                    color=rgba[:3],
+                    opacity=rgba[3],
+                )
+            )
+
+        if not visual_meshes:
+            print("Warning: URDF has no readable visual meshes; using simple robot skeleton.")
+        return visual_meshes
+
+    def visual_mesh_instances(self, pose: SixAxisRobotPose) -> List[Tuple[pv.PolyData, Tuple[float, float, float], float]]:
+        link_transforms = {-1: pose.transforms[0]}
+        for transform_index, joint_index in enumerate(self.joint_indices, start=1):
+            if transform_index < len(pose.transforms):
+                link_transforms[joint_index] = pose.transforms[transform_index]
+
+        instances = []
+        for visual_mesh in self.visual_meshes:
+            link_transform = link_transforms.get(visual_mesh.link_index)
+            if link_transform is None:
+                link_transform = self._link_transform(visual_mesh.link_index)
+
+            mesh = visual_mesh.mesh.copy(deep=True)
+            mesh.transform(link_transform @ visual_mesh.local_transform, inplace=True)
+            instances.append((mesh, visual_mesh.color, visual_mesh.opacity))
+        return instances
+
+    def visual_actor_transforms(self, pose: SixAxisRobotPose) -> List[np.ndarray]:
+        link_transforms = {-1: pose.transforms[0]}
+        for transform_index, joint_index in enumerate(self.joint_indices, start=1):
+            if transform_index < len(pose.transforms):
+                link_transforms[joint_index] = pose.transforms[transform_index]
+
+        return [
+            link_transforms.get(visual_mesh.link_index, self.base_transform) @ visual_mesh.local_transform
+            for visual_mesh in self.visual_meshes
+        ]
 
     def forward_kinematics(self, joint_angles: np.ndarray) -> List[np.ndarray]:
-        transform = self.base_transform.copy()
-        transforms = [transform.copy()]
-
-        for joint_angle, row in zip(joint_angles, self.config.dh_parameters):
-            alpha_deg, a, theta_offset_deg, d = row
-            transform = transform @ _modified_dh_transform(
-                math.radians(alpha_deg),
-                a,
-                joint_angle + math.radians(theta_offset_deg),
-                d,
-            )
-            transforms.append(transform.copy())
-
+        joint_angles = np.clip(np.asarray(joint_angles, dtype=float), self.lower_limits, self.upper_limits)
+        self._apply_joint_positions(joint_angles)
+        transforms = [self.base_transform.copy()]
+        for joint_index in self.joint_indices:
+            transforms.append(self._link_transform(joint_index))
         return transforms
+
+    def _ik_seed_candidates(self, seed: np.ndarray) -> List[np.ndarray]:
+        midpoint = (self.lower_limits + self.upper_limits) * 0.5
+        span = self.upper_limits - self.lower_limits
+        candidates = [
+            seed,
+            self.home_angles,
+            midpoint,
+        ]
+        for scale in (-0.35, 0.35):
+            candidates.append(midpoint + span * scale)
+
+        alternating = np.ones(len(self.joint_indices))
+        alternating[1::2] = -1.0
+        candidates.append(midpoint + span * 0.25 * alternating)
+        candidates.append(midpoint - span * 0.25 * alternating)
+
+        unique_candidates = []
+        for candidate in candidates:
+            clipped = np.clip(np.asarray(candidate, dtype=float), self.lower_limits, self.upper_limits)
+            if not any(np.allclose(clipped, existing, atol=1e-5) for existing in unique_candidates):
+                unique_candidates.append(clipped)
+        return unique_candidates
 
     def solve_ik(self, target_transform: np.ndarray, seed_angles: np.ndarray | None = None) -> SixAxisRobotPose:
         seed = self.home_angles if seed_angles is None else np.asarray(seed_angles, dtype=float)
         seed = np.clip(seed, self.lower_limits, self.upper_limits)
+        target_position = (target_transform[:3, 3] / self.scene_units_per_urdf_unit).tolist()
+        target_orientation = _quaternion_from_matrix(target_transform[:3, :3])
+        best_pose = None
+        best_score = float("inf")
 
-        def residual(joint_angles: np.ndarray) -> np.ndarray:
-            current = self.forward_kinematics(joint_angles)[-1]
-            position_error = target_transform[:3, 3] - current[:3, 3]
-            rotation_error = _rotation_error_vector(current[:3, :3], target_transform[:3, :3])
-            return np.concatenate((position_error, rotation_error * 20.0))
+        for rest_pose in self._ik_seed_candidates(seed):
+            self._apply_joint_positions(rest_pose)
+            result = p.calculateInverseKinematics(
+                self.robot_id,
+                self.end_effector_link_index,
+                targetPosition=target_position,
+                targetOrientation=target_orientation,
+                lowerLimits=self.lower_limits.tolist(),
+                upperLimits=self.upper_limits.tolist(),
+                jointRanges=self.joint_ranges.tolist(),
+                restPoses=rest_pose.tolist(),
+                maxNumIterations=300,
+                residualThreshold=1e-5,
+                physicsClientId=self.client_id,
+            )
+            joint_angles = np.clip(
+                np.asarray(result[: len(self.joint_indices)], dtype=float),
+                self.lower_limits,
+                self.upper_limits,
+            )
+            transforms = self.forward_kinematics(joint_angles)
+            final_transform = transforms[-1]
+            position_error = float(np.linalg.norm(target_transform[:3, 3] - final_transform[:3, 3]))
+            rotation_error = float(
+                np.linalg.norm(_rotation_error_vector(final_transform[:3, :3], target_transform[:3, :3]))
+            )
+            rotation_error_deg = math.degrees(rotation_error)
+            pose = SixAxisRobotPose(
+                joint_angles=joint_angles,
+                joint_points=np.array([transform[:3, 3] for transform in transforms]),
+                transforms=transforms,
+                position_error=position_error,
+                rotation_error_deg=rotation_error_deg,
+                success=bool(position_error < 5.0 and rotation_error_deg < 10.0),
+            )
+            score = position_error + rotation_error_deg * 2.0
+            if score < best_score:
+                best_score = score
+                best_pose = pose
+            if pose.success:
+                return pose
 
-        result = least_squares(
-            residual,
-            seed,
-            bounds=(self.lower_limits, self.upper_limits),
-            max_nfev=120,
-            xtol=1e-4,
-            ftol=1e-4,
-            gtol=1e-4,
-        )
-        transforms = self.forward_kinematics(result.x)
-        final_transform = transforms[-1]
-        position_error = float(np.linalg.norm(target_transform[:3, 3] - final_transform[:3, 3]))
-        rotation_error = float(np.linalg.norm(_rotation_error_vector(final_transform[:3, :3], target_transform[:3, :3])))
-
-        return SixAxisRobotPose(
-            joint_angles=result.x,
-            joint_points=np.array([transform[:3, 3] for transform in transforms]),
-            transforms=transforms,
-            position_error=position_error,
-            rotation_error_deg=math.degrees(rotation_error),
-            success=bool(result.success and position_error < 2.0 and math.degrees(rotation_error) < 5.0),
-        )
+        return best_pose
 
 
 def _trimesh_to_pyvista(mesh: trimesh.Trimesh) -> pv.PolyData:
@@ -806,10 +1050,12 @@ class MeshVisualizer:
         self.tangents = path_data.tangents
         self.tool_frames = _build_continuous_frames(self.points, self.normals, self.tangents)
         self.robot_frames = _build_robot_frames(self.tool_frames, self.tcp_offset_xyzabc)
+        min_alignment, mean_alignment = _frame_normal_alignment(self.tool_frames, self.normals)
         print(
             f"Generated {len(self.points)} points, {len(self.normals)} normals, "
             f"{len(self.tangents)} tangents, and {len(self.robot_frames)} robot frames. "
-            f"Toolpath clearance: {self.toolpath_clearance:.2f} mm."
+            f"Toolpath clearance: {self.toolpath_clearance:.2f} mm. "
+            f"TCP/path Z alignment: min={min_alignment:.3f}, mean={mean_alignment:.3f}."
         )
 
     def generate_frames(self) -> None:
@@ -964,17 +1210,23 @@ class MeshVisualizer:
 
         axis_length = self.axis_length * 0.6
         marker_radius = max(self.axis_length * 0.08, EPSILON)
-        base_animation_delay = 0.015
-        max_animation_steps = 1200
-        interpolation_steps = 6
-        stride = max(1, len(self.robot_frames) // max_animation_steps)
+        target_fps = 60.0
+        max_path_keyframes = 420
+        interpolation_steps = 12
+        stride = max(1, len(self.robot_frames) // max_path_keyframes)
         state = {
             "index": 0,
             "playing": False,
+            "paused": False,
+            "playback_generation": 0,
+            "playback_cursor": 0,
             "speed": 1.0,
             "jog_angles_deg": np.degrees(self.last_joint_angles).copy(),
             "wcs_jog_xyzabc": np.zeros(6, dtype=float),
+            "trajectory": None,
+            "playback_frames": [],
         }
+        joint_count = len(self.six_axis_robot.joint_indices)
         actor_names = [
             "animated_tcp_marker",
             "animated_flange_marker",
@@ -984,12 +1236,22 @@ class MeshVisualizer:
             "animated_tcp_flange_link",
             "animated_frame_text",
             "animated_pose_text",
+            "home_pose_text",
+            "machining_start_text",
+            "machining_start_marker",
+            "machining_start_flange_marker",
             "robot_jog_text",
             "wcs_jog_text",
             "six_axis_robot_base",
         ]
-        actor_names.extend([f"six_axis_robot_joint_{index}" for index in range(7)])
-        actor_names.extend([f"six_axis_robot_link_{index}" for index in range(6)])
+        actor_names.extend([f"six_axis_robot_joint_{index}" for index in range(joint_count + 1)])
+        actor_names.extend([f"six_axis_robot_link_{index}" for index in range(joint_count)])
+        actor_names.extend(
+            [
+                f"six_axis_robot_visual_{index}"
+                for index in range(len(self.six_axis_robot.visual_meshes))
+            ]
+        )
         if self.show_flange_frames:
             actor_names.extend(["animated_flange_x", "animated_flange_y", "animated_flange_z"])
 
@@ -1002,12 +1264,22 @@ class MeshVisualizer:
             for suffix, mesh, color in zip(("x", "y", "z"), _frame_axis_polydata(frame, axis_length), colors):
                 plotter.add_mesh(mesh, color=color, line_width=width, name=f"{prefix}_{suffix}")
 
+        def format_joint_text(joint_angles_deg: np.ndarray) -> str:
+            return "\n".join(
+                f"J{index + 1}: {angle:.2f} deg"
+                for index, angle in enumerate(joint_angles_deg)
+            )
+
         def add_six_axis_robot_pose(pose: SixAxisRobotPose) -> None:
             visuals = self.six_axis_robot.config.visuals
             robot_color = visuals.link_color if pose.success else visuals.error_color
             joint_color = visuals.joint_color if pose.success else visuals.error_color
             joint_radius = max(visuals.joint_radius, EPSILON)
             link_radius = max(visuals.link_radius, EPSILON)
+
+            if self.six_axis_robot.visual_meshes:
+                add_or_update_visual_robot_pose(pose)
+                return
 
             for link_index, (start, end) in enumerate(zip(pose.joint_points[:-1], pose.joint_points[1:])):
                 direction = end - start
@@ -1042,6 +1314,32 @@ class MeshVisualizer:
                     name=f"six_axis_robot_joint_{joint_index}",
                 )
 
+        def add_or_update_visual_robot_pose(pose: SixAxisRobotPose) -> bool:
+            if not self.six_axis_robot.visual_meshes:
+                return False
+
+            transforms = self.six_axis_robot.visual_actor_transforms(pose)
+            existing_actors = [
+                plotter.actors.get(f"six_axis_robot_visual_{mesh_index}")
+                for mesh_index in range(len(self.six_axis_robot.visual_meshes))
+            ]
+            if all(actor is not None for actor in existing_actors):
+                for actor, transform in zip(existing_actors, transforms):
+                    actor.SetUserMatrix(_vtk_matrix_from_numpy(transform))
+                return True
+
+            for mesh_index, visual_mesh in enumerate(self.six_axis_robot.visual_meshes):
+                mesh = visual_mesh.mesh.copy(deep=True)
+                actor = plotter.add_mesh(
+                    mesh,
+                    color=visual_mesh.color,
+                    opacity=visual_mesh.opacity,
+                    smooth_shading=True,
+                    name=f"six_axis_robot_visual_{mesh_index}",
+                )
+                actor.SetUserMatrix(_vtk_matrix_from_numpy(transforms[mesh_index]))
+            return True
+
         def pose_from_joint_angles(joint_angles: np.ndarray) -> SixAxisRobotPose:
             transforms = self.six_axis_robot.forward_kinematics(joint_angles)
             return SixAxisRobotPose(
@@ -1063,6 +1361,102 @@ class MeshVisualizer:
             current_transform = self.six_axis_robot.forward_kinematics(self.last_joint_angles)[-1]
             state["wcs_jog_xyzabc"] = flange_xyzabc_from_transform(current_transform)
 
+        def clear_lightweight_pose_actors() -> None:
+            for name in (
+                "animated_tcp_marker",
+                "animated_flange_marker",
+                "animated_tcp_x",
+                "animated_tcp_y",
+                "animated_tcp_z",
+                "animated_tcp_flange_link",
+                "animated_frame_text",
+                "animated_pose_text",
+                "home_pose_text",
+                "machining_start_text",
+                "machining_start_marker",
+                "machining_start_flange_marker",
+                "robot_jog_text",
+                "wcs_jog_text",
+            ):
+                if plotter.actors.get(name):
+                    plotter.remove_actor(name, render=False)
+
+        def machining_start_pose(seed_angles: np.ndarray | None = None) -> SixAxisRobotPose:
+            return self.six_axis_robot.solve_ik(
+                _frame_to_transform(self.robot_frames[0].flange),
+                self.six_axis_robot.home_angles if seed_angles is None else seed_angles,
+            )
+
+        def show_home_pose(_state: bool = False) -> None:
+            if state["playing"]:
+                return
+
+            joint_angles = self.six_axis_robot.home_angles.copy()
+            pose = pose_from_joint_angles(joint_angles)
+            self.last_joint_angles = joint_angles.copy()
+            state["jog_angles_deg"] = np.degrees(joint_angles).copy()
+            state["wcs_jog_xyzabc"] = flange_xyzabc_from_transform(pose.transforms[-1])
+
+            clear_lightweight_pose_actors()
+            if not add_or_update_visual_robot_pose(pose):
+                add_six_axis_robot_pose(pose)
+            plotter.add_text(
+                (
+                    "Home position\n"
+                    f"{format_joint_text(state['jog_angles_deg'])}"
+                ),
+                position="lower_right",
+                font_size=10,
+                color="black",
+                name="home_pose_text",
+            )
+            plotter.render()
+
+        def show_machining_start_pose(_state: bool = False) -> None:
+            if state["playing"]:
+                return
+
+            pose = machining_start_pose(self.last_joint_angles)
+            self.last_joint_angles = pose.joint_angles.copy()
+            state["jog_angles_deg"] = np.degrees(pose.joint_angles).copy()
+            state["wcs_jog_xyzabc"] = flange_xyzabc_from_transform(pose.transforms[-1])
+            robot_frame = self.robot_frames[0]
+
+            clear_lightweight_pose_actors()
+            if not add_or_update_visual_robot_pose(pose):
+                add_six_axis_robot_pose(pose)
+            plotter.add_mesh(
+                pv.Sphere(radius=marker_radius * 1.4, center=robot_frame.tcp.point),
+                color="lime",
+                name="machining_start_marker",
+            )
+            plotter.add_mesh(
+                pv.Sphere(radius=marker_radius * 1.1, center=robot_frame.flange.point),
+                color="white",
+                name="machining_start_flange_marker",
+            )
+            add_frame_axes(robot_frame.tcp, "animated_tcp", ["red", "green", "blue"], 5)
+            plotter.add_mesh(
+                _line_polydata([np.array([robot_frame.flange.point, robot_frame.tcp.point])]),
+                color="white",
+                line_width=2,
+                name="animated_tcp_flange_link",
+            )
+            plotter.add_text(
+                (
+                    "Machining start\n"
+                    f"Frame 1/{len(self.robot_frames)}\n"
+                    f"{format_joint_text(state['jog_angles_deg'])}\n"
+                    f"IK pos err: {pose.position_error:.2f}\n"
+                    f"IK rot err: {pose.rotation_error_deg:.2f} deg"
+                ),
+                position="lower_right",
+                font_size=10,
+                color="black",
+                name="machining_start_text",
+            )
+            plotter.render()
+
         def show_joint_jog_pose() -> None:
             if state["playing"]:
                 return
@@ -1078,12 +1472,7 @@ class MeshVisualizer:
             plotter.add_text(
                 (
                     "Robot jog\n"
-                    f"J1: {state['jog_angles_deg'][0]:.2f} deg\n"
-                    f"J2: {state['jog_angles_deg'][1]:.2f} deg\n"
-                    f"J3: {state['jog_angles_deg'][2]:.2f} deg\n"
-                    f"J4: {state['jog_angles_deg'][3]:.2f} deg\n"
-                    f"J5: {state['jog_angles_deg'][4]:.2f} deg\n"
-                    f"J6: {state['jog_angles_deg'][5]:.2f} deg\n"
+                    f"{format_joint_text(state['jog_angles_deg'])}\n"
                     f"Flange XYZ: ({flange_x:.1f}, {flange_y:.1f}, {flange_z:.1f})\n"
                     f"Flange ABC: ({flange_a:.1f}, {flange_b:.1f}, {flange_c:.1f}) deg"
                 ),
@@ -1122,12 +1511,7 @@ class MeshVisualizer:
                     f"A: {a:.1f} deg\n"
                     f"B: {b:.1f} deg\n"
                     f"C: {c:.1f} deg\n"
-                    f"J1: {state['jog_angles_deg'][0]:.2f} deg\n"
-                    f"J2: {state['jog_angles_deg'][1]:.2f} deg\n"
-                    f"J3: {state['jog_angles_deg'][2]:.2f} deg\n"
-                    f"J4: {state['jog_angles_deg'][3]:.2f} deg\n"
-                    f"J5: {state['jog_angles_deg'][4]:.2f} deg\n"
-                    f"J6: {state['jog_angles_deg'][5]:.2f} deg\n"
+                    f"{format_joint_text(state['jog_angles_deg'])}\n"
                     f"IK pos err: {pose.position_error:.2f}\n"
                     f"IK rot err: {pose.rotation_error_deg:.2f} deg"
                 ),
@@ -1191,12 +1575,7 @@ class MeshVisualizer:
                     joint_angles_deg = np.degrees(six_axis_pose.joint_angles)
                     joint_text = (
                         "\n"
-                        f"J1: {joint_angles_deg[0]:.2f} deg\n"
-                        f"J2: {joint_angles_deg[1]:.2f} deg\n"
-                        f"J3: {joint_angles_deg[2]:.2f} deg\n"
-                        f"J4: {joint_angles_deg[3]:.2f} deg\n"
-                        f"J5: {joint_angles_deg[4]:.2f} deg\n"
-                        f"J6: {joint_angles_deg[5]:.2f} deg\n"
+                        f"{format_joint_text(joint_angles_deg)}\n"
                         f"IK pos err: {six_axis_pose.position_error:.2f}\n"
                         f"IK rot err: {six_axis_pose.rotation_error_deg:.2f} deg"
                     )
@@ -1225,8 +1604,11 @@ class MeshVisualizer:
             state["jog_angles_deg"] = np.degrees(joint_angles).copy()
             state["wcs_jog_xyzabc"] = flange_xyzabc_from_transform(pose.transforms[-1])
 
-            remove_animation_actors()
-            add_six_axis_robot_pose(pose)
+            if not add_or_update_visual_robot_pose(pose):
+                remove_animation_actors()
+                add_six_axis_robot_pose(pose)
+            else:
+                clear_lightweight_pose_actors()
             plotter.add_text(
                 (
                     f"Frame {state['index'] + 1}/{len(self.robot_frames)} | "
@@ -1237,7 +1619,6 @@ class MeshVisualizer:
                 color="white",
                 name="animated_frame_text",
             )
-            plotter.render()
 
         def update_frame_cursor(value: float) -> None:
             if state["playing"]:
@@ -1256,35 +1637,146 @@ class MeshVisualizer:
         def next_frame(_state: bool) -> None:
             step_frame(1)
 
-        def play_path(_state: bool) -> None:
-            if state["playing"]:
-                return
-
-            state["playing"] = True
-            start_index = state["index"]
-            previous_angles = self.last_joint_angles.copy()
-            for index in range(start_index, len(self.robot_frames), stride):
-                state["index"] = index
+        def build_playback_trajectory(start_index: int) -> List[Tuple[int, np.ndarray]]:
+            home_angles = self.six_axis_robot.home_angles.copy()
+            start_pose = machining_start_pose(home_angles)
+            trajectory = [
+                (-1, home_angles),
+                (0, start_pose.joint_angles.copy()),
+            ]
+            previous_angles = start_pose.joint_angles.copy()
+            path_start = max(0, start_index)
+            for index in range(path_start, len(self.robot_frames), stride):
+                if index == 0:
+                    continue
                 target_pose = self.six_axis_robot.solve_ik(
                     _frame_to_transform(self.robot_frames[index].flange),
                     previous_angles,
                 )
-                target_angles = target_pose.joint_angles.copy()
+                previous_angles = target_pose.joint_angles.copy()
+                trajectory.append((index, previous_angles.copy()))
+
+            final_index = len(self.robot_frames) - 1
+            if trajectory and trajectory[-1][0] != final_index:
+                target_pose = self.six_axis_robot.solve_ik(
+                    _frame_to_transform(self.robot_frames[final_index].flange),
+                    previous_angles,
+                )
+                trajectory.append((final_index, target_pose.joint_angles.copy()))
+
+            return trajectory
+
+        def expanded_playback_frames(trajectory: List[Tuple[int, np.ndarray]]) -> List[Tuple[int, np.ndarray, int, int]]:
+            frames = []
+            if not trajectory:
+                return frames
+
+            previous_index, previous_angles = trajectory[0]
+            frames.append((previous_index, previous_angles.copy(), 0, interpolation_steps))
+            for target_index, target_angles in trajectory[1:]:
                 for substep in range(1, interpolation_steps + 1):
                     blend = substep / interpolation_steps
                     interpolated_angles = previous_angles + (target_angles - previous_angles) * blend
-                    show_interpolated_robot_pose(index, interpolated_angles, substep, interpolation_steps)
-                    plotter.update()
-                    time.sleep(base_animation_delay / (interpolation_steps * max(state["speed"], EPSILON)))
-                previous_angles = target_angles
+                    interpolated_index = int(round(previous_index + (target_index - previous_index) * blend))
+                    frames.append((interpolated_index, interpolated_angles, substep, interpolation_steps))
+                previous_index = target_index
+                previous_angles = target_angles.copy()
+            return frames
 
-            state["index"] = 0
+        def stop_playback(_state: bool = False) -> None:
             state["playing"] = False
+            state["paused"] = False
+            state["playback_generation"] += 1
+            state["playback_cursor"] = 0
+            state["playback_frames"] = []
+            if plotter.actors.get("animated_frame_text"):
+                plotter.remove_actor("animated_frame_text", render=False)
+            plotter.add_text(
+                "Playback stopped",
+                position="upper_left",
+                font_size=10,
+                color="white",
+                name="animated_frame_text",
+            )
+            plotter.render()
+
+        def playback_timer_step(_timer_step: int, generation: int) -> None:
+            if generation != state["playback_generation"]:
+                return
+            if not state["playing"] or state["paused"]:
+                return
+
+            frames = state["playback_frames"]
+            cursor = state["playback_cursor"]
+            if cursor >= len(frames):
+                state["playing"] = False
+                state["paused"] = False
+                state["playback_cursor"] = 0
+                return
+
+            index, joint_angles, substep, substeps = frames[cursor]
+            show_interpolated_robot_pose(index, joint_angles, substep, substeps)
+            plotter.update()
+            state["playback_cursor"] = cursor + 1
+
+        def start_playback_timer(generation: int) -> None:
+            remaining_frames = max(1, len(state["playback_frames"]) - state["playback_cursor"])
+            timer_duration_ms = max(1, int(1000.0 / (target_fps * max(state["speed"], EPSILON))))
+            plotter.add_timer_event(
+                max_steps=max(remaining_frames * 20, 1000),
+                duration=timer_duration_ms,
+                callback=lambda timer_step: playback_timer_step(timer_step, generation),
+            )
+
+        def play_path(_state: bool) -> None:
+            if state["playing"] and state["paused"]:
+                state["paused"] = False
+                state["playback_generation"] += 1
+                start_playback_timer(state["playback_generation"])
+                return
+
+            if state["playing"]:
+                state["paused"] = True
+                if plotter.actors.get("animated_frame_text"):
+                    plotter.remove_actor("animated_frame_text", render=False)
+                plotter.add_text(
+                    "Playback paused",
+                    position="upper_left",
+                    font_size=10,
+                    color="white",
+                    name="animated_frame_text",
+                )
+                plotter.render()
+                return
+
+            state["playing"] = True
+            state["paused"] = False
+            state["playback_generation"] += 1
+            generation = state["playback_generation"]
+            start_index = state["index"]
+            plotter.add_text(
+                "Preparing smooth robot path...",
+                position="upper_left",
+                font_size=10,
+                color="white",
+                name="animated_frame_text",
+            )
+            plotter.render()
+
+            trajectory = build_playback_trajectory(start_index)
+            state["trajectory"] = trajectory
+            if not trajectory:
+                state["playing"] = False
+                return
+
+            state["playback_frames"] = expanded_playback_frames(trajectory)
+            state["playback_cursor"] = 0
+            start_playback_timer(generation)
 
         def update_speed(value: float) -> None:
             state["speed"] = float(value)
 
-        show_robot_frame(0)
+        show_home_pose()
         plotter.reset_camera()
         plotter.add_checkbox_button_widget(
             play_path,
@@ -1296,11 +1788,59 @@ class MeshVisualizer:
             background_color="black",
         )
         plotter.add_text(
-            "Play TCP",
+            "Play/Pause",
             position=(48, 14),
             font_size=10,
             color="black",
             name="play_button_label",
+        )
+        plotter.add_checkbox_button_widget(
+            stop_playback,
+            value=False,
+            position=(160, 10),
+            size=30,
+            color_on="tomato",
+            color_off="gray",
+            background_color="black",
+        )
+        plotter.add_text(
+            "Stop",
+            position=(198, 14),
+            font_size=10,
+            color="black",
+            name="stop_button_label",
+        )
+        plotter.add_checkbox_button_widget(
+            show_home_pose,
+            value=False,
+            position=(10, 54),
+            size=30,
+            color_on="deepskyblue",
+            color_off="gray",
+            background_color="black",
+        )
+        plotter.add_text(
+            "Home",
+            position=(48, 58),
+            font_size=10,
+            color="black",
+            name="home_button_label",
+        )
+        plotter.add_checkbox_button_widget(
+            show_machining_start_pose,
+            value=False,
+            position=(10, 98),
+            size=30,
+            color_on="orange",
+            color_off="gray",
+            background_color="black",
+        )
+        plotter.add_text(
+            "Start",
+            position=(48, 102),
+            font_size=10,
+            color="black",
+            name="machining_start_button_label",
         )
         plotter.add_checkbox_button_widget(
             previous_frame,
@@ -1352,9 +1892,9 @@ class MeshVisualizer:
             pointb=(0.95, 0.10),
             style="modern",
         )
-        joint_slider_y = [0.88, 0.82, 0.76, 0.70, 0.64, 0.58]
+        joint_slider_y = np.linspace(0.88, 0.52, joint_count)
         for joint_index, y_position in enumerate(joint_slider_y):
-            lower_limit, upper_limit = self.six_axis_robot.config.joint_limits_deg[joint_index]
+            lower_limit, upper_limit = self.six_axis_robot.joint_limits_deg[joint_index]
             plotter.add_slider_widget(
                 lambda value, index=joint_index: update_joint_jog(index, value),
                 rng=(lower_limit, upper_limit),
@@ -1405,6 +1945,9 @@ class MeshVisualizer:
             )
         plotter.add_key_event("Left", lambda: step_frame(-1))
         plotter.add_key_event("Right", lambda: step_frame(1))
+        plotter.add_key_event("space", lambda: play_path(False))
+        plotter.add_key_event("s", lambda: stop_playback(False))
+        plotter.add_key_event("h", lambda: show_home_pose(False))
 
     def _add_pickable_points(self, plotter: pv.Plotter) -> None:
         if len(self.points) == 0 or not self.toolpath_data:
@@ -1451,16 +1994,24 @@ class MeshVisualizer:
         print("Interactive point picking enabled.")
 
 
+# Edit these seven joint angles to define the robot home position for the KUKA iiwa URDF.
+KUKA_HOME_JOINT_ANGLES_DEG = np.array([-135.0, 0.0, 0.0, 90.0, -75.0, 75.0, 0.0], dtype=float)
+
+
 def main() -> None:
     visualizer = MeshVisualizer(
         mesh_path=r"C:\Users\shish\C-\Slicing\50x50parallelkey-Body.stl",
         wcs_origin=np.array([0, 0, 0]),
-        stl_target_position=np.array([1000, 300, 1000]),
+        stl_target_position=np.array([300, 200, 200]),
         stl_target_abc=np.array([0.0, 0.0, 0]),
         num_layers=30,
         axis_length=10,
         toolpath_clearance=50.0,
-        tcp_offset_xyzabc=np.array([0.0, 0.0, -20.0, 0.0, 0.0, 0.0]),
+        tcp_offset_xyzabc=np.array([0.0, 0.0, 500, -90, 0.0, 0.0]),
+        robot_kinematics_config=SixAxisRobotConfig(
+            base_xyzabc=np.array([0, 0, 0, 0.0, 0.0, 0]),
+            home_joint_angles_deg=KUKA_HOME_JOINT_ANGLES_DEG,
+        ),
         show_flange_frames=False #flange frame visibility
     )
 

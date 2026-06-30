@@ -429,6 +429,30 @@ def _build_continuous_frames(
     return frames
 
 
+def _apply_local_frame_rotation(frame: ToolFrame, rotation_abc_deg: np.ndarray) -> ToolFrame:
+    offset_rotation = _rpy_to_matrix(*rotation_abc_deg)
+    frame_rotation = _matrix_from_axes(frame.x_axis, frame.y_axis, frame.z_axis)
+    rotated_rotation = frame_rotation @ offset_rotation
+    return ToolFrame(
+        point=frame.point.copy(),
+        normal=_normalize(rotated_rotation[:, 2]),
+        tangent=_normalize(rotated_rotation[:, 0]),
+        x_axis=_normalize(rotated_rotation[:, 0]),
+        y_axis=_normalize(rotated_rotation[:, 1]),
+        z_axis=_normalize(rotated_rotation[:, 2]),
+    )
+
+
+def _apply_local_frame_rotation_to_frames(
+    frames: List[ToolFrame],
+    rotation_abc_deg: np.ndarray,
+) -> List[ToolFrame]:
+    rotation_abc_deg = np.asarray(rotation_abc_deg, dtype=float)
+    if np.linalg.norm(rotation_abc_deg) < EPSILON:
+        return frames
+    return [_apply_local_frame_rotation(frame, rotation_abc_deg) for frame in frames]
+
+
 def _build_robot_frames(tool_frames: List[ToolFrame], tcp_offset_xyzabc: np.ndarray) -> List[RobotFrame]:
     flange_to_tcp = _transform_from_xyzabc(tcp_offset_xyzabc)
     tcp_to_flange = np.linalg.inv(flange_to_tcp)
@@ -786,7 +810,15 @@ def _sample_frame_meshes(
 def _add_line_meshes(plotter: pv.Plotter, meshes: List[Tuple[pv.PolyData, str, int]]) -> None:
     for mesh, color, width in meshes:
         if mesh.n_points > 0:
-            plotter.add_mesh(mesh, color=color, line_width=width)
+            if mesh.n_lines > 0:
+                plotter.add_mesh(mesh, color=color, line_width=width)
+            else:
+                plotter.add_mesh(
+                    mesh,
+                    color=color,
+                    point_size=width,
+                    render_points_as_spheres=True,
+                )
 
 
 def _frame_axis_polydata(frame: ToolFrame, length: float) -> Tuple[pv.PolyData, pv.PolyData, pv.PolyData]:
@@ -1053,8 +1085,14 @@ class MeshVisualizer:
         toolpath_clearance: float = 0.0,
         toolpath_mode: str = "layers",
         top_section_offset: float = 0.5,
+        tool_z_points_toward_surface: bool = False,
+        path_frame_rotation_abc: np.ndarray | None = None,
+        tool_frame_rotation_abc: np.ndarray | None = None,
         tcp_offset_xyzabc: np.ndarray | None = None,
         show_flange_frames: bool = False,
+        show_static_tcp_frames: bool = True,
+        show_static_flange_frames: bool = True,
+        show_frame_points: bool = True,
         show_robot_kinematics: bool = True,
         show_playback_buttons: bool = False,
         auto_start_playback: bool = True,
@@ -1077,7 +1115,20 @@ class MeshVisualizer:
         self.toolpath_clearance = float(toolpath_clearance)
         self.toolpath_mode = toolpath_mode
         self.top_section_offset = float(top_section_offset)
+        self.tool_z_points_toward_surface = tool_z_points_toward_surface
+        if path_frame_rotation_abc is None:
+            path_frame_rotation_abc = tool_frame_rotation_abc
+        self.path_frame_rotation_abc = (
+            np.zeros(3, dtype=float)
+            if path_frame_rotation_abc is None
+            else np.asarray(path_frame_rotation_abc, dtype=float)
+        )
+        if self.path_frame_rotation_abc.shape != (3,):
+            raise ValueError("path_frame_rotation_abc must contain exactly three values: A, B, C.")
         self.show_flange_frames = show_flange_frames
+        self.show_static_tcp_frames = show_static_tcp_frames
+        self.show_static_flange_frames = show_static_flange_frames
+        self.show_frame_points = show_frame_points
         self.show_robot_kinematics = show_robot_kinematics
         self.show_playback_buttons = show_playback_buttons
         self.auto_start_playback = auto_start_playback
@@ -1144,16 +1195,25 @@ class MeshVisualizer:
         )
         self.smooth_paths = path_data.smooth_paths
         self.fallback_paths = path_data.fallback_paths
-        self.normals = path_data.normals
-        self.points = path_data.points + self.normals * self.toolpath_clearance
+        surface_normals = path_data.normals
+        tool_normals = -surface_normals if self.tool_z_points_toward_surface else surface_normals
+        self.normals = tool_normals
+        self.points = path_data.points + surface_normals * self.toolpath_clearance
         self.tangents = path_data.tangents
         self.tool_frames = _build_continuous_frames(self.points, self.normals, self.tangents)
+        self.tool_frames = _apply_local_frame_rotation_to_frames(
+            self.tool_frames,
+            self.path_frame_rotation_abc,
+        )
         self.robot_frames = _build_robot_frames(self.tool_frames, self.tcp_offset_xyzabc)
         min_alignment, mean_alignment = _frame_normal_alignment(self.tool_frames, self.normals)
+        tool_direction_text = "toward surface" if self.tool_z_points_toward_surface else "with surface normal"
         print(
             f"Generated {len(self.points)} points, {len(self.normals)} normals, "
             f"{len(self.tangents)} tangents, and {len(self.robot_frames)} robot frames. "
             f"Toolpath clearance: {self.toolpath_clearance:.2f} mm. "
+            f"Tool Z direction: {tool_direction_text}. "
+            f"Path frame ABC offset: {self.path_frame_rotation_abc}. "
             f"TCP/path Z alignment: min={min_alignment:.3f}, mean={mean_alignment:.3f}."
         )
 
@@ -1178,21 +1238,35 @@ class MeshVisualizer:
         sample_indices = np.linspace(0, len(self.robot_frames) - 1, frame_count, dtype=int)
         sampled_tcp_frames = [self.robot_frames[index].tcp for index in sample_indices]
         sampled_flange_frames = [self.robot_frames[index].flange for index in sample_indices]
-        self.frame_meshes.extend(
-            _sample_frame_meshes(
-                sampled_tcp_frames,
-                self.axis_length * 0.2,
-                colors=["red", "green", "blue"],
+        if self.show_static_tcp_frames:
+            self.frame_meshes.extend(
+                _sample_frame_meshes(
+                    sampled_tcp_frames,
+                    self.axis_length * 0.28,
+                    colors=["red", "green", "blue"],
+                    width=2,
+                )
             )
-        )
-        if self.show_flange_frames:
+        if self.show_static_flange_frames:
             self.frame_meshes.extend(
                 _sample_frame_meshes(
                     sampled_flange_frames,
-                    self.axis_length * 0.18,
+                    self.axis_length * 0.24,
                     colors=["magenta", "lime", "cyan"],
+                    width=2,
                 )
             )
+
+        if self.show_frame_points:
+            tcp_points = np.array([frame.point for frame in sampled_tcp_frames])
+            flange_points = np.array([frame.point for frame in sampled_flange_frames])
+            connector_segments = [
+                np.array([tcp.point, flange.point])
+                for tcp, flange in zip(sampled_tcp_frames, sampled_flange_frames)
+            ]
+            self.frame_meshes.append((_line_polydata(connector_segments), "white", 1))
+            self.frame_meshes.append((pv.PolyData(tcp_points), "yellow", 8))
+            self.frame_meshes.append((pv.PolyData(flange_points), "white", 7))
 
     def generate_6dof_data(self) -> None:
         if not self.robot_frames:
@@ -1290,6 +1364,7 @@ class MeshVisualizer:
 
         _add_line_meshes(plotter, self.frame_meshes)
         self._add_toolpaths(plotter)
+        self._add_frame_legend(plotter)
         self._add_robot_playback(plotter)
         self._add_pickable_points(plotter)
         return plotter
@@ -1342,6 +1417,26 @@ class MeshVisualizer:
                 plotter.add_lines(path, color="darkred", width=1, connected=True)
         if len(self.points) > 1 and abs(self.toolpath_clearance) > EPSILON:
             plotter.add_lines(self.points, color="cyan", width=3, connected=True)
+
+    def _add_frame_legend(self, plotter: pv.Plotter) -> None:
+        if not self.robot_frames or not (self.show_static_tcp_frames or self.show_static_flange_frames):
+            return
+
+        legend_lines = []
+        if self.show_static_tcp_frames:
+            legend_lines.append("TCP frame: X red, Y green, Z blue; point yellow")
+        if self.show_static_flange_frames:
+            legend_lines.append("Flange frame: X magenta, Y lime, Z cyan; point white")
+        if self.show_frame_points:
+            legend_lines.append("White lines connect TCP to flange")
+
+        plotter.add_text(
+            "\n".join(legend_lines),
+            position="upper_right",
+            font_size=9,
+            color="black",
+            name="frame_legend",
+        )
 
     def _add_robot_playback(self, plotter: pv.Plotter) -> None:
         if not self.robot_frames:
@@ -1944,92 +2039,17 @@ class MeshVisualizer:
             add_momentary_button(
                 lambda: play_path(False),
                 position=(10, 10),
-                size=30,
+                size=20,
                 color_on="lime",
                 color_off="gray",
                 background_color="black",
             )
             plotter.add_text(
                 "Play/Pause",
-                position=(48, 14),
-                font_size=10,
+                position=(36, 11),
+                font_size=8,
                 color="black",
                 name="play_button_label",
-            )
-            add_momentary_button(
-                lambda: stop_playback(False),
-                position=(160, 10),
-                size=30,
-                color_on="tomato",
-                color_off="gray",
-                background_color="black",
-            )
-            plotter.add_text(
-                "Stop",
-                position=(198, 14),
-                font_size=10,
-                color="black",
-                name="stop_button_label",
-            )
-            add_momentary_button(
-                lambda: show_home_pose(False),
-                position=(10, 54),
-                size=30,
-                color_on="deepskyblue",
-                color_off="gray",
-                background_color="black",
-            )
-            plotter.add_text(
-                "Home",
-                position=(48, 58),
-                font_size=10,
-                color="black",
-                name="home_button_label",
-            )
-            add_momentary_button(
-                lambda: show_machining_start_pose(False),
-                position=(10, 98),
-                size=30,
-                color_on="orange",
-                color_off="gray",
-                background_color="black",
-            )
-            plotter.add_text(
-                "Start",
-                position=(48, 102),
-                font_size=10,
-                color="black",
-                name="machining_start_button_label",
-            )
-            add_momentary_button(
-                lambda: previous_frame(False),
-                position=(700, 200),
-                size=30,
-                color_on="deepskyblue",
-                color_off="gray",
-                background_color="black",
-            )
-            plotter.add_text(
-                "Back",
-                position=(700, 250),
-                font_size=10,
-                color="black",
-                name="previous_button_label",
-            )
-            add_momentary_button(
-                lambda: next_frame(False),
-                position=(850, 200),
-                size=30,
-                color_on="deepskyblue",
-                color_off="gray",
-                background_color="black",
-            )
-            plotter.add_text(
-                "Forth",
-                position=(850, 250),
-                font_size=10,
-                color="black",
-                name="next_button_label",
             )
         plotter.add_slider_widget(
             update_speed,
@@ -2062,44 +2082,6 @@ class MeshVisualizer:
                 style="modern",
             )
         sync_wcs_jog_from_current_robot()
-        if self.show_playback_buttons:
-            wcs_jog_controls = [
-                ("X-", 0, -10.0, (10, 315), (48, 319)),
-                ("X+", 0, 10.0, (92, 315), (130, 319)),
-                ("Y-", 1, -10.0, (10, 355), (48, 359)),
-                ("Y+", 1, 10.0, (92, 355), (130, 359)),
-                ("Z-", 2, -10.0, (10, 395), (48, 399)),
-                ("Z+", 2, 10.0, (92, 395), (130, 399)),
-                ("A-", 3, -5.0, (10, 445), (48, 449)),
-                ("A+", 3, 5.0, (92, 445), (130, 449)),
-                ("B-", 4, -5.0, (10, 485), (48, 489)),
-                ("B+", 4, 5.0, (92, 485), (130, 489)),
-                ("C-", 5, -5.0, (10, 525), (48, 529)),
-                ("C+", 5, 5.0, (92, 525), (130, 529)),
-            ]
-            plotter.add_text(
-                "WCS jog",
-                position=(10, 285),
-                font_size=10,
-                color="black",
-                name="wcs_jog_label",
-            )
-            for label, axis_index, step, button_position, label_position in wcs_jog_controls:
-                add_momentary_button(
-                    lambda index=axis_index, delta=step: jog_wcs_axis(index, delta),
-                    position=button_position,
-                    size=28,
-                    color_on="orange",
-                    color_off="gray",
-                    background_color="black",
-                )
-                plotter.add_text(
-                    label,
-                    position=label_position,
-                    font_size=9,
-                    color="black",
-                    name=f"wcs_jog_{label.replace('+', 'plus').replace('-', 'minus')}_label",
-                )
         plotter.add_key_event("Left", lambda: step_frame(-1))
         plotter.add_key_event("Right", lambda: step_frame(1))
         plotter.add_key_event("space", lambda: play_path(False))
@@ -2171,10 +2153,15 @@ ROTARY_TABLE_ANGLE_DEG = 0.0
 # Use "top" for only the top section, or "layers" for the old full-height slicing.
 TOOLPATH_MODE = "top"
 TOP_SECTION_OFFSET = 0.5
+TOOL_Z_POINTS_TOWARD_SURFACE = True
 
-# Keep this button-free if PyVista widget clicks behave badly on your machine.
-AUTO_START_SIMULATION = True
-SHOW_PLAYBACK_BUTTONS = False
+# Local rotation applied to every generated path frame after tangent/normal generation.
+# A rotates about frame X, B about frame Y, C about frame Z, all in degrees.
+PATH_FRAME_ROTATION_ABC = np.array([0.0, 0.0, 180], dtype=float)
+
+# One small Play/Pause button; Stop/Home stay on keyboard shortcuts.
+AUTO_START_SIMULATION = False
+SHOW_PLAYBACK_BUTTONS = True
 
 
 def main() -> None:
@@ -2188,7 +2175,9 @@ def main() -> None:
         toolpath_clearance=50.0,
         toolpath_mode=TOOLPATH_MODE,
         top_section_offset=TOP_SECTION_OFFSET,
-        tcp_offset_xyzabc=np.array([0.0, 0.0, 500, 0, 0.0, 0.0]),
+        tool_z_points_toward_surface=TOOL_Z_POINTS_TOWARD_SURFACE,
+        path_frame_rotation_abc=PATH_FRAME_ROTATION_ABC,
+        tcp_offset_xyzabc=np.array([0.0, 0.0, 50, 0, 0.0, 0.0]),
         robot_kinematics_config=SixAxisRobotConfig(
             urdf_path=str(KR10_R1100_URDF_PATH),
             end_effector_link_name="link_6",
@@ -2206,7 +2195,10 @@ def main() -> None:
         ),
         show_playback_buttons=SHOW_PLAYBACK_BUTTONS,
         auto_start_playback=AUTO_START_SIMULATION,
-        show_flange_frames=False #flange frame visibility
+        show_static_tcp_frames=True,             #static tcp frame visibility
+        show_static_flange_frames=True,          #static flange frame visibility
+        show_frame_points=True,                  #frame points visibility
+        show_flange_frames=True                  #animated flange frame visibility
     )
 
     visualizer.generate_path_data()

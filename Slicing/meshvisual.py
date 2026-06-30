@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 import math
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -73,10 +74,22 @@ class RobotVisualSettings:
 class SixAxisRobotConfig:
     urdf_path: str = "kuka_iiwa/model.urdf"
     end_effector_link_name: str = "lbr_iiwa_link_7"
+    active_joint_count: int | None = None
     base_xyzabc: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=float))
     home_joint_angles_deg: np.ndarray | None = None
     scene_units_per_urdf_unit: float = 1000.0
     visuals: RobotVisualSettings = field(default_factory=RobotVisualSettings)
+
+
+@dataclass
+class RotaryTableConfig:
+    enabled: bool = False
+    center_xyz: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=float))
+    axis_xyz: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 1.0]))
+    angle_deg: float = 0.0
+    radius: float = 140.0
+    height: float = 35.0
+    color: str = "dimgray"
 
 
 @dataclass
@@ -185,6 +198,23 @@ def _rpy_to_matrix(roll_deg: float, pitch_deg: float, yaw_deg: float) -> np.ndar
     return rotation_z @ rotation_y @ rotation_x
 
 
+def _axis_angle_to_matrix(axis: np.ndarray, angle_deg: float) -> np.ndarray:
+    axis = _normalize(np.asarray(axis, dtype=float))
+    angle = math.radians(angle_deg)
+    x, y, z = axis
+    c = math.cos(angle)
+    s = math.sin(angle)
+    one_minus_c = 1.0 - c
+    return np.array(
+        [
+            [c + x * x * one_minus_c, x * y * one_minus_c - z * s, x * z * one_minus_c + y * s],
+            [y * x * one_minus_c + z * s, c + y * y * one_minus_c, y * z * one_minus_c - x * s],
+            [z * x * one_minus_c - y * s, z * y * one_minus_c + x * s, c + z * z * one_minus_c],
+        ],
+        dtype=float,
+    )
+
+
 def _matrix_from_axes(x_axis: np.ndarray, y_axis: np.ndarray, z_axis: np.ndarray) -> np.ndarray:
     return np.array([x_axis, y_axis, z_axis], dtype=float).T
 
@@ -199,6 +229,15 @@ def _transform_from_pose(position: np.ndarray, rotation: np.ndarray) -> np.ndarr
 def _transform_from_xyzabc(xyzabc: np.ndarray) -> np.ndarray:
     x, y, z, a, b, c = np.asarray(xyzabc, dtype=float)
     return _transform_from_pose(np.array([x, y, z]), _rpy_to_matrix(a, b, c))
+
+
+def _rotation_about_point_transform(center: np.ndarray, axis: np.ndarray, angle_deg: float) -> np.ndarray:
+    rotation = _axis_angle_to_matrix(axis, angle_deg)
+    center = np.asarray(center, dtype=float)
+    transform = np.eye(4)
+    transform[:3, :3] = rotation
+    transform[:3, 3] = center - rotation @ center
+    return transform
 
 
 def _modified_dh_transform(alpha: float, a: float, theta: float, d: float) -> np.ndarray:
@@ -441,11 +480,14 @@ class SixAxisRobot:
         upper_limits = []
         rest_poses = []
         self.end_effector_link_index = self._resolve_end_effector_link_index(config.end_effector_link_name)
+        active_joint_count = config.active_joint_count
 
         for joint_index in range(p.getNumJoints(self.robot_id, physicsClientId=self.client_id)):
             joint_info = p.getJointInfo(self.robot_id, joint_index, physicsClientId=self.client_id)
             joint_type = joint_info[2]
             if joint_type not in (p.JOINT_REVOLUTE, p.JOINT_PRISMATIC):
+                continue
+            if active_joint_count is not None and len(self.joint_indices) >= active_joint_count:
                 continue
 
             lower_limit = float(joint_info[8])
@@ -586,10 +628,13 @@ class SixAxisRobot:
             if transform_index < len(pose.transforms):
                 link_transforms[joint_index] = pose.transforms[transform_index]
 
-        return [
-            link_transforms.get(visual_mesh.link_index, self.base_transform) @ visual_mesh.local_transform
-            for visual_mesh in self.visual_meshes
-        ]
+        transforms = []
+        for visual_mesh in self.visual_meshes:
+            link_transform = link_transforms.get(visual_mesh.link_index)
+            if link_transform is None:
+                link_transform = self._link_transform(visual_mesh.link_index)
+            transforms.append(link_transform @ visual_mesh.local_transform)
+        return transforms
 
     def forward_kinematics(self, joint_angles: np.ndarray) -> List[np.ndarray]:
         joint_angles = np.clip(np.asarray(joint_angles, dtype=float), self.lower_limits, self.upper_limits)
@@ -918,17 +963,34 @@ def _smooth_layer(points: np.ndarray, normals: np.ndarray, smoothing: float) -> 
     return smooth_points, smooth_normals
 
 
-def generate_layered_path(mesh: trimesh.Trimesh, num_layers: int = 30, smoothing: float = 0.1) -> LayeredPathData:
+def generate_layered_path(
+    mesh: trimesh.Trimesh,
+    num_layers: int = 30,
+    smoothing: float = 0.1,
+    toolpath_mode: str = "layers",
+    top_section_offset: float = 0.5,
+) -> LayeredPathData:
     mesh.visual.face_colors = np.full((len(mesh.faces), 4), [180, 180, 180, 255], dtype=np.uint8)
 
     bounds = mesh.bounds
     model_scale = np.max(mesh.extents)
-    z_levels = np.linspace(bounds[0][2], bounds[1][2], num_layers)
+    mode = toolpath_mode.lower().strip()
+    if mode not in {"layers", "top"}:
+        raise ValueError("toolpath_mode must be either 'layers' or 'top'.")
+
+    if mode == "top":
+        offset = max(float(top_section_offset), model_scale * 1e-5, EPSILON)
+        z_levels = np.array([bounds[1][2] - offset], dtype=float)
+    else:
+        z_levels = np.linspace(bounds[0][2], bounds[1][2], num_layers)
 
     data = LayeredPathData([], [], [], [], [], [], [], [], [])
     last_layer_endpoint = None
 
-    print(f"Slicing model from Z={bounds[0][2]:.2f} to Z={bounds[1][2]:.2f}")
+    if mode == "top":
+        print(f"Generating top-only toolpath at Z={z_levels[0]:.2f} (top Z={bounds[1][2]:.2f}).")
+    else:
+        print(f"Slicing model from Z={bounds[0][2]:.2f} to Z={bounds[1][2]:.2f}")
 
     for z in z_levels:
         try:
@@ -943,7 +1005,10 @@ def generate_layered_path(mesh: trimesh.Trimesh, num_layers: int = 30, smoothing
         if layer_points is None or len(layer_points) < 2:
             continue
 
-        layer_normals = _raycast_normals(mesh, layer_points, model_scale, z)
+        if mode == "top":
+            layer_normals = np.tile(np.array([0.0, 0.0, 1.0]), (len(layer_points), 1))
+        else:
+            layer_normals = _raycast_normals(mesh, layer_points, model_scale, z)
         ordered_points, ordered_normals, last_layer_endpoint = _ordered_layer(
             layer_points, layer_normals, last_layer_endpoint, True
         )
@@ -952,7 +1017,10 @@ def generate_layered_path(mesh: trimesh.Trimesh, num_layers: int = 30, smoothing
         try:
             smooth_points, smooth_normals = _smooth_layer(ordered_points, ordered_normals, smoothing)
             smooth_points, smooth_normals = _ensure_counter_clockwise(smooth_points, smooth_normals)
-            smooth_normals = _raycast_normals(mesh, smooth_points, model_scale, z)
+            if mode == "top":
+                smooth_normals = np.tile(np.array([0.0, 0.0, 1.0]), (len(smooth_points), 1))
+            else:
+                smooth_normals = _raycast_normals(mesh, smooth_points, model_scale, z)
             smooth_tangents = _path_tangents(smooth_points, smooth_normals)
             data.path_points.append(smooth_points)
             data.path_normals.append(smooth_normals)
@@ -983,10 +1051,15 @@ class MeshVisualizer:
         num_layers: int = 150,
         axis_length: float = 10.0,
         toolpath_clearance: float = 0.0,
+        toolpath_mode: str = "layers",
+        top_section_offset: float = 0.5,
         tcp_offset_xyzabc: np.ndarray | None = None,
         show_flange_frames: bool = False,
         show_robot_kinematics: bool = True,
+        show_playback_buttons: bool = False,
+        auto_start_playback: bool = True,
         robot_kinematics_config: SixAxisRobotConfig | None = None,
+        rotary_table_config: RotaryTableConfig | None = None,
     ):
         self.mesh_path = mesh_path
         self.wcs_origin = np.asarray(wcs_origin, dtype=float)
@@ -1002,8 +1075,15 @@ class MeshVisualizer:
         self.num_layers = num_layers
         self.axis_length = axis_length
         self.toolpath_clearance = float(toolpath_clearance)
+        self.toolpath_mode = toolpath_mode
+        self.top_section_offset = float(top_section_offset)
         self.show_flange_frames = show_flange_frames
         self.show_robot_kinematics = show_robot_kinematics
+        self.show_playback_buttons = show_playback_buttons
+        self.auto_start_playback = auto_start_playback
+        self.rotary_table_config = rotary_table_config or RotaryTableConfig()
+        self.rotary_table_config.center_xyz = np.asarray(self.rotary_table_config.center_xyz, dtype=float)
+        self.rotary_table_config.axis_xyz = _normalize(np.asarray(self.rotary_table_config.axis_xyz, dtype=float))
         self.tcp_offset_xyzabc = (
             np.zeros(6, dtype=float)
             if tcp_offset_xyzabc is None
@@ -1035,14 +1115,33 @@ class MeshVisualizer:
         mesh.apply_translation(-mesh.centroid)
         mesh.apply_transform(_transform_from_pose(np.zeros(3), self.stl_target_rotation))
         mesh.apply_translation(self.stl_target_position)
+        if self.rotary_table_config.enabled:
+            mesh.apply_transform(
+                _rotation_about_point_transform(
+                    self.rotary_table_config.center_xyz,
+                    self.rotary_table_config.axis_xyz,
+                    self.rotary_table_config.angle_deg,
+                )
+            )
         self.mesh = mesh
-        print(f"Loaded mesh. Centroid: {self.mesh.centroid}, ABC: {self.stl_target_abc}")
+        table_text = (
+            f", table angle: {self.rotary_table_config.angle_deg:.2f} deg"
+            if self.rotary_table_config.enabled
+            else ""
+        )
+        print(f"Loaded mesh. Centroid: {self.mesh.centroid}, ABC: {self.stl_target_abc}{table_text}")
 
     def generate_path_data(self, smoothing: float = 0.1) -> None:
         if self.mesh is None:
             raise ValueError("Mesh has not been loaded.")
 
-        path_data = generate_layered_path(self.mesh, self.num_layers, smoothing)
+        path_data = generate_layered_path(
+            self.mesh,
+            self.num_layers,
+            smoothing,
+            self.toolpath_mode,
+            self.top_section_offset,
+        )
         self.smooth_paths = path_data.smooth_paths
         self.fallback_paths = path_data.fallback_paths
         self.normals = path_data.normals
@@ -1186,6 +1285,7 @@ class MeshVisualizer:
             raise ValueError("Mesh has not been loaded.")
 
         plotter = pv.Plotter()
+        self._add_rotary_table(plotter)
         plotter.add_mesh(_trimesh_to_pyvista(self.mesh), color="lightgray", show_edges=False)
 
         _add_line_meshes(plotter, self.frame_meshes)
@@ -1193,6 +1293,45 @@ class MeshVisualizer:
         self._add_robot_playback(plotter)
         self._add_pickable_points(plotter)
         return plotter
+
+    def _add_rotary_table(self, plotter: pv.Plotter) -> None:
+        config = self.rotary_table_config
+        if not config.enabled:
+            return
+
+        center = np.asarray(config.center_xyz, dtype=float)
+        axis = _normalize(np.asarray(config.axis_xyz, dtype=float))
+        radius = max(float(config.radius), EPSILON)
+        height = max(float(config.height), EPSILON)
+        body_center = center - axis * (height * 0.5)
+        frame_length = max(radius * 0.45, self.axis_length * 2.0)
+        angle_transform = _axis_angle_to_matrix(axis, config.angle_deg)
+
+        plotter.add_mesh(
+            pv.Cylinder(
+                center=body_center,
+                direction=axis,
+                radius=radius,
+                height=height,
+                resolution=96,
+            ),
+            color=config.color,
+            opacity=0.38,
+            name="rotary_table_body",
+        )
+
+        axis_line = _line_polydata([np.array([center - axis * height, center + axis * radius])])
+        plotter.add_mesh(axis_line, color="purple", line_width=5, name="rotary_table_axis")
+
+        x_axis = angle_transform @ _fallback_tangent(axis)
+        y_axis = _normalize(np.cross(axis, x_axis))
+        table_frame = _axis_meshes(
+            center,
+            frame_length,
+            axes=(x_axis, y_axis, axis),
+            colors=("red", "green", "purple"),
+        )
+        _add_line_meshes(plotter, table_frame)
 
     def _add_toolpaths(self, plotter: pv.Plotter) -> None:
         for path in self.smooth_paths:
@@ -1259,6 +1398,27 @@ class MeshVisualizer:
             for name in actor_names:
                 if plotter.actors.get(name):
                     plotter.remove_actor(name, render=False)
+
+        def add_momentary_button(callback, **widget_kwargs):
+            widget_ref = {"widget": None, "resetting": False}
+
+            def wrapped_callback(_state: bool) -> None:
+                if widget_ref["resetting"]:
+                    return
+
+                callback()
+                widget = widget_ref["widget"]
+                if widget is not None:
+                    widget_ref["resetting"] = True
+                    widget.GetRepresentation().SetState(0)
+                    widget_ref["resetting"] = False
+
+            widget_ref["widget"] = plotter.add_checkbox_button_widget(
+                wrapped_callback,
+                value=False,
+                **widget_kwargs,
+            )
+            return widget_ref["widget"]
 
         def add_frame_axes(frame: ToolFrame, prefix: str, colors: List[str], width: int) -> None:
             for suffix, mesh, color in zip(("x", "y", "z"), _frame_axis_polydata(frame, axis_length), colors):
@@ -1689,6 +1849,7 @@ class MeshVisualizer:
             state["playback_generation"] += 1
             state["playback_cursor"] = 0
             state["playback_frames"] = []
+            state["trajectory"] = None
             if plotter.actors.get("animated_frame_text"):
                 plotter.remove_actor("animated_frame_text", render=False)
             plotter.add_text(
@@ -1737,6 +1898,7 @@ class MeshVisualizer:
 
             if state["playing"]:
                 state["paused"] = True
+                state["playback_generation"] += 1
                 if plotter.actors.get("animated_frame_text"):
                     plotter.remove_actor("animated_frame_text", render=False)
                 plotter.add_text(
@@ -1778,102 +1940,97 @@ class MeshVisualizer:
 
         show_home_pose()
         plotter.reset_camera()
-        plotter.add_checkbox_button_widget(
-            play_path,
-            value=False,
-            position=(10, 10),
-            size=30,
-            color_on="lime",
-            color_off="gray",
-            background_color="black",
-        )
-        plotter.add_text(
-            "Play/Pause",
-            position=(48, 14),
-            font_size=10,
-            color="black",
-            name="play_button_label",
-        )
-        plotter.add_checkbox_button_widget(
-            stop_playback,
-            value=False,
-            position=(160, 10),
-            size=30,
-            color_on="tomato",
-            color_off="gray",
-            background_color="black",
-        )
-        plotter.add_text(
-            "Stop",
-            position=(198, 14),
-            font_size=10,
-            color="black",
-            name="stop_button_label",
-        )
-        plotter.add_checkbox_button_widget(
-            show_home_pose,
-            value=False,
-            position=(10, 54),
-            size=30,
-            color_on="deepskyblue",
-            color_off="gray",
-            background_color="black",
-        )
-        plotter.add_text(
-            "Home",
-            position=(48, 58),
-            font_size=10,
-            color="black",
-            name="home_button_label",
-        )
-        plotter.add_checkbox_button_widget(
-            show_machining_start_pose,
-            value=False,
-            position=(10, 98),
-            size=30,
-            color_on="orange",
-            color_off="gray",
-            background_color="black",
-        )
-        plotter.add_text(
-            "Start",
-            position=(48, 102),
-            font_size=10,
-            color="black",
-            name="machining_start_button_label",
-        )
-        plotter.add_checkbox_button_widget(
-            previous_frame,
-            value=False,
-            position=(700, 200),
-            size=30,
-            color_on="deepskyblue",
-            color_off="gray",
-            background_color="black",
-        )
-        plotter.add_text(
-            "Back",
-            position=(700, 250),
-            font_size=10,
-            color="black",
-            name="previous_button_label",
-        )
-        plotter.add_checkbox_button_widget(
-            next_frame,
-            value=False,
-            position=(850, 200),
-            size=30,
-            color_on="deepskyblue",
-            color_off="gray",
-            background_color="black",
-        )
-        plotter.add_text(
-            "Forth",
-            position=(850, 250),
-            font_size=10,
-            color="black",
-            name="next_button_label",
-        )
+        if self.show_playback_buttons:
+            add_momentary_button(
+                lambda: play_path(False),
+                position=(10, 10),
+                size=30,
+                color_on="lime",
+                color_off="gray",
+                background_color="black",
+            )
+            plotter.add_text(
+                "Play/Pause",
+                position=(48, 14),
+                font_size=10,
+                color="black",
+                name="play_button_label",
+            )
+            add_momentary_button(
+                lambda: stop_playback(False),
+                position=(160, 10),
+                size=30,
+                color_on="tomato",
+                color_off="gray",
+                background_color="black",
+            )
+            plotter.add_text(
+                "Stop",
+                position=(198, 14),
+                font_size=10,
+                color="black",
+                name="stop_button_label",
+            )
+            add_momentary_button(
+                lambda: show_home_pose(False),
+                position=(10, 54),
+                size=30,
+                color_on="deepskyblue",
+                color_off="gray",
+                background_color="black",
+            )
+            plotter.add_text(
+                "Home",
+                position=(48, 58),
+                font_size=10,
+                color="black",
+                name="home_button_label",
+            )
+            add_momentary_button(
+                lambda: show_machining_start_pose(False),
+                position=(10, 98),
+                size=30,
+                color_on="orange",
+                color_off="gray",
+                background_color="black",
+            )
+            plotter.add_text(
+                "Start",
+                position=(48, 102),
+                font_size=10,
+                color="black",
+                name="machining_start_button_label",
+            )
+            add_momentary_button(
+                lambda: previous_frame(False),
+                position=(700, 200),
+                size=30,
+                color_on="deepskyblue",
+                color_off="gray",
+                background_color="black",
+            )
+            plotter.add_text(
+                "Back",
+                position=(700, 250),
+                font_size=10,
+                color="black",
+                name="previous_button_label",
+            )
+            add_momentary_button(
+                lambda: next_frame(False),
+                position=(850, 200),
+                size=30,
+                color_on="deepskyblue",
+                color_off="gray",
+                background_color="black",
+            )
+            plotter.add_text(
+                "Forth",
+                position=(850, 250),
+                font_size=10,
+                color="black",
+                name="next_button_label",
+            )
         plotter.add_slider_widget(
             update_speed,
             rng=(0.1, 5.0),
@@ -1905,49 +2062,56 @@ class MeshVisualizer:
                 style="modern",
             )
         sync_wcs_jog_from_current_robot()
-        wcs_jog_controls = [
-            ("X-", 0, -10.0, (10, 315), (48, 319)),
-            ("X+", 0, 10.0, (92, 315), (130, 319)),
-            ("Y-", 1, -10.0, (10, 355), (48, 359)),
-            ("Y+", 1, 10.0, (92, 355), (130, 359)),
-            ("Z-", 2, -10.0, (10, 395), (48, 399)),
-            ("Z+", 2, 10.0, (92, 395), (130, 399)),
-            ("A-", 3, -5.0, (10, 445), (48, 449)),
-            ("A+", 3, 5.0, (92, 445), (130, 449)),
-            ("B-", 4, -5.0, (10, 485), (48, 489)),
-            ("B+", 4, 5.0, (92, 485), (130, 489)),
-            ("C-", 5, -5.0, (10, 525), (48, 529)),
-            ("C+", 5, 5.0, (92, 525), (130, 529)),
-        ]
-        plotter.add_text(
-            "WCS jog",
-            position=(10, 285),
-            font_size=10,
-            color="black",
-            name="wcs_jog_label",
-        )
-        for label, axis_index, step, button_position, label_position in wcs_jog_controls:
-            plotter.add_checkbox_button_widget(
-                lambda _state, index=axis_index, delta=step: jog_wcs_axis(index, delta),
-                value=False,
-                position=button_position,
-                size=28,
-                color_on="orange",
-                color_off="gray",
-                background_color="black",
-            )
+        if self.show_playback_buttons:
+            wcs_jog_controls = [
+                ("X-", 0, -10.0, (10, 315), (48, 319)),
+                ("X+", 0, 10.0, (92, 315), (130, 319)),
+                ("Y-", 1, -10.0, (10, 355), (48, 359)),
+                ("Y+", 1, 10.0, (92, 355), (130, 359)),
+                ("Z-", 2, -10.0, (10, 395), (48, 399)),
+                ("Z+", 2, 10.0, (92, 395), (130, 399)),
+                ("A-", 3, -5.0, (10, 445), (48, 449)),
+                ("A+", 3, 5.0, (92, 445), (130, 449)),
+                ("B-", 4, -5.0, (10, 485), (48, 489)),
+                ("B+", 4, 5.0, (92, 485), (130, 489)),
+                ("C-", 5, -5.0, (10, 525), (48, 529)),
+                ("C+", 5, 5.0, (92, 525), (130, 529)),
+            ]
             plotter.add_text(
-                label,
-                position=label_position,
-                font_size=9,
+                "WCS jog",
+                position=(10, 285),
+                font_size=10,
                 color="black",
-                name=f"wcs_jog_{label.replace('+', 'plus').replace('-', 'minus')}_label",
+                name="wcs_jog_label",
             )
+            for label, axis_index, step, button_position, label_position in wcs_jog_controls:
+                add_momentary_button(
+                    lambda index=axis_index, delta=step: jog_wcs_axis(index, delta),
+                    position=button_position,
+                    size=28,
+                    color_on="orange",
+                    color_off="gray",
+                    background_color="black",
+                )
+                plotter.add_text(
+                    label,
+                    position=label_position,
+                    font_size=9,
+                    color="black",
+                    name=f"wcs_jog_{label.replace('+', 'plus').replace('-', 'minus')}_label",
+                )
         plotter.add_key_event("Left", lambda: step_frame(-1))
         plotter.add_key_event("Right", lambda: step_frame(1))
         plotter.add_key_event("space", lambda: play_path(False))
         plotter.add_key_event("s", lambda: stop_playback(False))
         plotter.add_key_event("h", lambda: show_home_pose(False))
+        plotter.add_key_event("m", lambda: show_machining_start_pose(False))
+        if self.auto_start_playback:
+            plotter.add_timer_event(
+                max_steps=1,
+                duration=700,
+                callback=lambda _timer_step: play_path(False),
+            )
 
     def _add_pickable_points(self, plotter: pv.Plotter) -> None:
         if len(self.points) == 0 or not self.toolpath_data:
@@ -1994,24 +2158,54 @@ class MeshVisualizer:
         print("Interactive point picking enabled.")
 
 
-# Edit these seven joint angles to define the robot home position for the KUKA iiwa URDF.
-KUKA_HOME_JOINT_ANGLES_DEG = np.array([-135.0, 0.0, 0.0, 90.0, -75.0, 75.0, 0.0], dtype=float)
+SCRIPT_DIR = Path(__file__).resolve().parent
+KR10_R1100_URDF_PATH = SCRIPT_DIR / "robot_models" / "kuka_experimental" / "kuka_kr10_support" / "urdf" / "kr10r1100sixx_pybullet.urdf"
+
+# Edit these six values to define the KUKA KR10 R1100 sixx arm home. The 7th axis is the rotary table below.
+KR10_R1100_HOME_JOINT_ANGLES_DEG = np.array([0.0, -90.0, 90.0, 0.0, 0.0, 0.0], dtype=float)
+
+# Edit this to rotate the workobject/table around its local Z axis before slicing.
+ROTARY_TABLE_CENTER_XYZ = np.array([300.0, 200.0, 200.0], dtype=float)
+ROTARY_TABLE_ANGLE_DEG = 0.0
+
+# Use "top" for only the top section, or "layers" for the old full-height slicing.
+TOOLPATH_MODE = "top"
+TOP_SECTION_OFFSET = 0.5
+
+# Keep this button-free if PyVista widget clicks behave badly on your machine.
+AUTO_START_SIMULATION = True
+SHOW_PLAYBACK_BUTTONS = False
 
 
 def main() -> None:
     visualizer = MeshVisualizer(
-        mesh_path=r"C:\Users\shish\C-\Slicing\50x50parallelkey-Body.stl",
+        mesh_path=r"C:\Users\shish\C-\Slicing\Ramp.stl",
         wcs_origin=np.array([0, 0, 0]),
         stl_target_position=np.array([300, 200, 200]),
         stl_target_abc=np.array([0.0, 0.0, 0]),
         num_layers=30,
         axis_length=10,
         toolpath_clearance=50.0,
-        tcp_offset_xyzabc=np.array([0.0, 0.0, 500, -90, 0.0, 0.0]),
+        toolpath_mode=TOOLPATH_MODE,
+        top_section_offset=TOP_SECTION_OFFSET,
+        tcp_offset_xyzabc=np.array([0.0, 0.0, 500, 0, 0.0, 0.0]),
         robot_kinematics_config=SixAxisRobotConfig(
+            urdf_path=str(KR10_R1100_URDF_PATH),
+            end_effector_link_name="link_6",
+            active_joint_count=6,
             base_xyzabc=np.array([0, 0, 0, 0.0, 0.0, 0]),
-            home_joint_angles_deg=KUKA_HOME_JOINT_ANGLES_DEG,
+            home_joint_angles_deg=KR10_R1100_HOME_JOINT_ANGLES_DEG,
         ),
+        rotary_table_config=RotaryTableConfig(
+            enabled=True,
+            center_xyz=ROTARY_TABLE_CENTER_XYZ,
+            axis_xyz=np.array([0.0, 0.0, 1.0], dtype=float),
+            angle_deg=ROTARY_TABLE_ANGLE_DEG,
+            radius=160.0,
+            height=35.0,
+        ),
+        show_playback_buttons=SHOW_PLAYBACK_BUTTONS,
+        auto_start_playback=AUTO_START_SIMULATION,
         show_flange_frames=False #flange frame visibility
     )
 
@@ -2022,6 +2216,7 @@ def main() -> None:
     if visualizer.toolpath_data:
         visualizer.print_6dof_data_for_index(len(visualizer.toolpath_data) // 2)
 
+    print("Simulation controls: Space=play/pause, S=stop, Left/Right=step, H=home, M=machining start.")
     visualizer.get_scene().show()
 
 

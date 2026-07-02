@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 import math
 from pathlib import Path
+import time
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -109,6 +110,12 @@ class RobotVisualMesh:
     local_transform: np.ndarray
     color: Tuple[float, float, float]
     opacity: float
+
+
+@dataclass
+class SurfaceSelection:
+    seed_face_index: int
+    face_indices: np.ndarray
 
 
 def _stack_or_empty(parts: List[np.ndarray]) -> np.ndarray:
@@ -467,6 +474,32 @@ def _build_robot_frames(tool_frames: List[ToolFrame], tcp_offset_xyzabc: np.ndar
     return robot_frames
 
 
+def _build_robot_frames_with_flange_face_offset(
+    tool_frames: List[ToolFrame],
+    tcp_offset_xyzabc: np.ndarray,
+    flange_face_rotation_abc: np.ndarray,
+) -> List[RobotFrame]:
+    face_flange_to_tcp = _transform_from_xyzabc(tcp_offset_xyzabc)
+    urdf_flange_to_face_flange = _transform_from_xyzabc(
+        np.r_[np.zeros(3, dtype=float), np.asarray(flange_face_rotation_abc, dtype=float)]
+    )
+    tcp_to_urdf_flange = np.linalg.inv(urdf_flange_to_face_flange @ face_flange_to_tcp)
+    robot_frames: List[RobotFrame] = []
+
+    for tcp_frame in tool_frames:
+        tcp_transform = _frame_to_transform(tcp_frame)
+        urdf_flange_transform = tcp_transform @ tcp_to_urdf_flange
+        face_flange_transform = urdf_flange_transform @ urdf_flange_to_face_flange
+        robot_frames.append(
+            RobotFrame(
+                tcp=tcp_frame,
+                flange=_tool_frame_from_transform(face_flange_transform),
+            )
+        )
+
+    return robot_frames
+
+
 def _frame_normal_alignment(frames: List[ToolFrame], normals: np.ndarray) -> Tuple[float, float]:
     if not frames or len(normals) == 0:
         return 0.0, 0.0
@@ -666,6 +699,8 @@ class SixAxisRobot:
         transforms = [self.base_transform.copy()]
         for joint_index in self.joint_indices:
             transforms.append(self._link_transform(joint_index))
+        if self.end_effector_link_index not in self.joint_indices:
+            transforms.append(self._link_transform(self.end_effector_link_index))
         return transforms
 
     def _ik_seed_candidates(self, seed: np.ndarray) -> List[np.ndarray]:
@@ -750,6 +785,128 @@ def _trimesh_to_pyvista(mesh: trimesh.Trimesh) -> pv.PolyData:
 
     faces = np.hstack((np.full((len(mesh.faces), 1), 3), mesh.faces))
     return pv.PolyData(mesh.vertices, faces)
+
+
+def select_surface_interactively(
+    mesh: trimesh.Trimesh,
+    normal_angle_deg: float = 20.0,
+) -> SurfaceSelection | None:
+    selection: Dict[str, SurfaceSelection | bool] = {"done": False}
+    plotter = pv.Plotter(title="Select machining/painting surface")
+    pv_mesh = _trimesh_to_pyvista(mesh)
+    plotter.add_mesh(
+        pv_mesh,
+        color="lightgray",
+        show_edges=True,
+        edge_color="gray",
+        opacity=0.86,
+        name="selection_mesh",
+    )
+    plotter.add_text(
+        "Click one face on the surface to machine/paint.\n"
+        "A connected similar-normal patch will be previewed.\n"
+        "Press Done when the highlighted surface is correct.",
+        position="upper_left",
+        font_size=10,
+        color="black",
+        name="selection_help",
+    )
+
+    def finish_selection(_state: bool = False) -> None:
+        if "surface" not in selection:
+            plotter.add_text(
+                "Select a surface first, then press Done.",
+                position="lower_left",
+                font_size=10,
+                color="black",
+                name="selection_result",
+            )
+            plotter.render()
+            return
+        selection["done"] = True
+        plotter.add_text(
+            "Surface accepted. Opening simulation window...",
+            position="lower_left",
+            font_size=10,
+            color="black",
+            name="selection_result",
+        )
+        plotter.render()
+
+    plotter.add_checkbox_button_widget(
+        finish_selection,
+        value=False,
+        position=(10, 10),
+        size=24,
+        color_on="lime",
+        color_off="gray",
+        background_color="black",
+    )
+    plotter.add_text(
+        "Done",
+        position=(42, 12),
+        font_size=9,
+        color="black",
+        name="done_button_label",
+    )
+
+    def on_pick(_point, picker) -> None:
+        face_index = int(picker.GetCellId())
+        if face_index < 0:
+            return
+        face_indices = _select_connected_surface_faces(mesh, face_index, normal_angle_deg)
+        selection["surface"] = SurfaceSelection(face_index, face_indices)
+
+        selected_faces = np.hstack((np.full((len(face_indices), 1), 3), mesh.faces[face_indices]))
+        selected_mesh = pv.PolyData(mesh.vertices, selected_faces)
+        plotter.add_mesh(
+            selected_mesh,
+            color="orange",
+            show_edges=True,
+            edge_color="black",
+            opacity=0.72,
+            name="selected_surface",
+            pickable=False,
+        )
+        plotter.add_text(
+            f"Selected face {face_index}; patch faces: {len(face_indices)}.\n"
+            "Press Done to generate the path, or click another face to change selection.",
+            position="lower_left",
+            font_size=10,
+            color="black",
+            name="selection_result",
+        )
+        plotter.render()
+
+    plotter.enable_surface_point_picking(
+        callback=on_pick,
+        picker="cell",
+        use_picker=True,
+        left_clicking=True,
+        show_point=True,
+        point_size=14,
+        color="red",
+        show_message=False,
+    )
+    plotter.add_key_event("d", lambda: finish_selection(False))
+    plotter.add_key_event("Return", lambda: finish_selection(False))
+    plotter.show(interactive_update=True, auto_close=False)
+    while not bool(selection.get("done", False)):
+        if bool(getattr(plotter, "_closed", False)):
+            break
+        try:
+            plotter.update()
+        except Exception:
+            break
+        time.sleep(0.03)
+
+    if not bool(getattr(plotter, "_closed", False)):
+        plotter.close()
+
+    if not selection.get("done", False):
+        print("Selection window closed before Done was pressed.")
+        return None
+    return selection.get("surface")
 
 
 def _line_polydata(segments: List[np.ndarray]) -> pv.PolyData:
@@ -995,20 +1152,170 @@ def _smooth_layer(points: np.ndarray, normals: np.ndarray, smoothing: float) -> 
     return smooth_points, smooth_normals
 
 
+def _select_connected_surface_faces(
+    mesh: trimesh.Trimesh,
+    seed_face_index: int,
+    normal_angle_deg: float = 20.0,
+) -> np.ndarray:
+    if seed_face_index < 0 or seed_face_index >= len(mesh.faces):
+        raise ValueError(f"seed_face_index {seed_face_index} is outside the mesh face range.")
+
+    face_normals = np.asarray(mesh.face_normals, dtype=float)
+    seed_normal = _normalize(face_normals[seed_face_index])
+    min_dot = math.cos(math.radians(float(normal_angle_deg)))
+    adjacency: Dict[int, List[int]] = {index: [] for index in range(len(mesh.faces))}
+    for face_a, face_b in mesh.face_adjacency:
+        adjacency[int(face_a)].append(int(face_b))
+        adjacency[int(face_b)].append(int(face_a))
+
+    selected = set()
+    queue = [int(seed_face_index)]
+    while queue:
+        face_index = queue.pop()
+        if face_index in selected:
+            continue
+        normal = _normalize(face_normals[face_index])
+        if float(np.dot(normal, seed_normal)) < min_dot:
+            continue
+        selected.add(face_index)
+        queue.extend(adjacency[face_index])
+
+    return np.array(sorted(selected), dtype=int)
+
+
+def _surface_scanline_path(
+    mesh: trimesh.Trimesh,
+    face_indices: np.ndarray,
+    line_spacing: float | None = None,
+    point_spacing: float | None = None,
+) -> LayeredPathData:
+    face_indices = np.asarray(face_indices, dtype=int).reshape(-1)
+    if len(face_indices) == 0:
+        raise ValueError("No selected surface faces were provided.")
+
+    triangles = np.asarray(mesh.triangles[face_indices], dtype=float)
+    face_normals = _normalize_rows(np.asarray(mesh.face_normals[face_indices], dtype=float))
+    face_areas = np.asarray(mesh.area_faces[face_indices], dtype=float)
+    weighted_normal = np.sum(face_normals * face_areas[:, None], axis=0)
+    surface_normal = _normalize(weighted_normal)
+    origin = np.average(triangles.reshape(-1, 3), axis=0)
+    u_axis = _fallback_tangent(surface_normal)
+    v_axis = _normalize(np.cross(surface_normal, u_axis))
+
+    all_points = triangles.reshape(-1, 3)
+    relative_points = all_points - origin
+    uv_points = np.column_stack((relative_points @ u_axis, relative_points @ v_axis))
+    uv_min = uv_points.min(axis=0)
+    uv_max = uv_points.max(axis=0)
+    uv_span = np.maximum(uv_max - uv_min, EPSILON)
+    if line_spacing is None or line_spacing <= EPSILON:
+        line_spacing = max(float(np.max(uv_span)) / 24.0, EPSILON)
+    if point_spacing is None or point_spacing <= EPSILON:
+        point_spacing = max(float(line_spacing) * 0.5, EPSILON)
+
+    v_levels = np.arange(uv_min[1], uv_max[1] + line_spacing * 0.5, line_spacing)
+    data = LayeredPathData([], [], [], [], [], [], [], [], [])
+
+    for line_index, v_level in enumerate(v_levels):
+        segments = []
+        for triangle, normal in zip(triangles, face_normals):
+            rel = triangle - origin
+            tri_uv = np.column_stack((rel @ u_axis, rel @ v_axis))
+            intersections = []
+            for edge_index in range(3):
+                next_edge_index = (edge_index + 1) % 3
+                uv_a = tri_uv[edge_index]
+                uv_b = tri_uv[next_edge_index]
+                p_a = triangle[edge_index]
+                p_b = triangle[next_edge_index]
+                da = uv_a[1] - v_level
+                db = uv_b[1] - v_level
+
+                if abs(da) < 1e-8 and abs(db) < 1e-8:
+                    intersections.extend([(uv_a[0], p_a), (uv_b[0], p_b)])
+                    continue
+                if da * db > 0.0:
+                    continue
+                if abs(da - db) < 1e-12:
+                    continue
+
+                blend = da / (da - db)
+                if blend < -1e-8 or blend > 1.0 + 1e-8:
+                    continue
+                point = p_a + np.clip(blend, 0.0, 1.0) * (p_b - p_a)
+                u_value = uv_a[0] + np.clip(blend, 0.0, 1.0) * (uv_b[0] - uv_a[0])
+                intersections.append((u_value, point))
+
+            unique_intersections = []
+            for u_value, point in sorted(intersections, key=lambda item: item[0]):
+                if not any(np.linalg.norm(point - existing_point) < 1e-5 for _, existing_point in unique_intersections):
+                    unique_intersections.append((u_value, point))
+
+            if len(unique_intersections) < 2:
+                continue
+            start_u, start_point = unique_intersections[0]
+            end_u, end_point = unique_intersections[-1]
+            if np.linalg.norm(end_point - start_point) < 1e-5:
+                continue
+            segments.append((start_u, end_u, start_point, end_point, normal))
+
+        if not segments:
+            continue
+
+        segments.sort(key=lambda segment: (segment[0] + segment[1]) * 0.5)
+        if line_index % 2 == 1:
+            segments.reverse()
+
+        for start_u, end_u, start_point, end_point, normal in segments:
+            if line_index % 2 == 1:
+                start_point, end_point = end_point, start_point
+
+            length = np.linalg.norm(end_point - start_point)
+            sample_count = max(2, int(math.ceil(length / point_spacing)) + 1)
+            points = np.linspace(start_point, end_point, sample_count)
+            normals = np.tile(_normalize(normal), (sample_count, 1))
+            tangents = _path_tangents(points, normals)
+            data.path_points.append(points)
+            data.path_normals.append(normals)
+            data.path_tangents.append(tangents)
+            data.smooth_paths.append(points)
+            data.smooth_normals.append(normals)
+            data.smooth_tangents.append(tangents)
+
+    print(
+        f"Generated selected-surface raster path from {len(face_indices)} faces, "
+        f"{len(data.path_points)} strokes, line spacing {line_spacing:.2f}."
+    )
+    return data
+
+
 def generate_layered_path(
     mesh: trimesh.Trimesh,
     num_layers: int = 30,
     smoothing: float = 0.1,
     toolpath_mode: str = "layers",
     top_section_offset: float = 0.5,
+    selected_surface_face_indices: np.ndarray | None = None,
+    surface_line_spacing: float | None = None,
+    surface_point_spacing: float | None = None,
 ) -> LayeredPathData:
     mesh.visual.face_colors = np.full((len(mesh.faces), 4), [180, 180, 180, 255], dtype=np.uint8)
 
     bounds = mesh.bounds
     model_scale = np.max(mesh.extents)
     mode = toolpath_mode.lower().strip()
-    if mode not in {"layers", "top"}:
-        raise ValueError("toolpath_mode must be either 'layers' or 'top'.")
+    if mode not in {"layers", "top", "surface"}:
+        raise ValueError("toolpath_mode must be 'layers', 'top', or 'surface'.")
+
+    if mode == "surface":
+        if selected_surface_face_indices is None or len(selected_surface_face_indices) == 0:
+            raise ValueError("TOOLPATH_MODE='surface' requires selected surface face indices.")
+        return _surface_scanline_path(
+            mesh,
+            selected_surface_face_indices,
+            line_spacing=surface_line_spacing,
+            point_spacing=surface_point_spacing,
+        )
 
     if mode == "top":
         offset = max(float(top_section_offset), model_scale * 1e-5, EPSILON)
@@ -1085,10 +1392,14 @@ class MeshVisualizer:
         toolpath_clearance: float = 0.0,
         toolpath_mode: str = "layers",
         top_section_offset: float = 0.5,
+        selected_surface_face_indices: np.ndarray | None = None,
+        surface_line_spacing: float | None = None,
+        surface_point_spacing: float | None = None,
         tool_z_points_toward_surface: bool = False,
         path_frame_rotation_abc: np.ndarray | None = None,
         tool_frame_rotation_abc: np.ndarray | None = None,
         tcp_offset_xyzabc: np.ndarray | None = None,
+        flange_face_rotation_abc: np.ndarray | None = None,
         show_flange_frames: bool = False,
         show_static_tcp_frames: bool = True,
         show_static_flange_frames: bool = True,
@@ -1096,6 +1407,7 @@ class MeshVisualizer:
         show_robot_kinematics: bool = True,
         show_playback_buttons: bool = False,
         auto_start_playback: bool = True,
+        fast_playback: bool = True,
         robot_kinematics_config: SixAxisRobotConfig | None = None,
         rotary_table_config: RotaryTableConfig | None = None,
     ):
@@ -1115,6 +1427,21 @@ class MeshVisualizer:
         self.toolpath_clearance = float(toolpath_clearance)
         self.toolpath_mode = toolpath_mode
         self.top_section_offset = float(top_section_offset)
+        self.selected_surface_face_indices = (
+            None
+            if selected_surface_face_indices is None
+            else np.asarray(selected_surface_face_indices, dtype=int)
+        )
+        self.surface_line_spacing = (
+            None
+            if surface_line_spacing is None
+            else float(surface_line_spacing)
+        )
+        self.surface_point_spacing = (
+            None
+            if surface_point_spacing is None
+            else float(surface_point_spacing)
+        )
         self.tool_z_points_toward_surface = tool_z_points_toward_surface
         if path_frame_rotation_abc is None:
             path_frame_rotation_abc = tool_frame_rotation_abc
@@ -1132,6 +1459,7 @@ class MeshVisualizer:
         self.show_robot_kinematics = show_robot_kinematics
         self.show_playback_buttons = show_playback_buttons
         self.auto_start_playback = auto_start_playback
+        self.fast_playback = bool(fast_playback)
         self.rotary_table_config = rotary_table_config or RotaryTableConfig()
         self.rotary_table_config.center_xyz = np.asarray(self.rotary_table_config.center_xyz, dtype=float)
         self.rotary_table_config.axis_xyz = _normalize(np.asarray(self.rotary_table_config.axis_xyz, dtype=float))
@@ -1142,6 +1470,16 @@ class MeshVisualizer:
         )
         if self.tcp_offset_xyzabc.shape != (6,):
             raise ValueError("tcp_offset_xyzabc must contain exactly six values: X, Y, Z, A, B, C.")
+        self.flange_face_rotation_abc = (
+            np.zeros(3, dtype=float)
+            if flange_face_rotation_abc is None
+            else np.asarray(flange_face_rotation_abc, dtype=float)
+        )
+        if self.flange_face_rotation_abc.shape != (3,):
+            raise ValueError("flange_face_rotation_abc must contain exactly three values: A, B, C.")
+        self.urdf_flange_to_face_flange = _transform_from_xyzabc(
+            np.r_[np.zeros(3, dtype=float), self.flange_face_rotation_abc]
+        )
 
         self.mesh: trimesh.Trimesh | None = None
         self.points = np.empty((0, 3))
@@ -1192,6 +1530,9 @@ class MeshVisualizer:
             smoothing,
             self.toolpath_mode,
             self.top_section_offset,
+            self.selected_surface_face_indices,
+            self.surface_line_spacing,
+            self.surface_point_spacing,
         )
         self.smooth_paths = path_data.smooth_paths
         self.fallback_paths = path_data.fallback_paths
@@ -1205,7 +1546,11 @@ class MeshVisualizer:
             self.tool_frames,
             self.path_frame_rotation_abc,
         )
-        self.robot_frames = _build_robot_frames(self.tool_frames, self.tcp_offset_xyzabc)
+        self.robot_frames = _build_robot_frames_with_flange_face_offset(
+            self.tool_frames,
+            self.tcp_offset_xyzabc,
+            self.flange_face_rotation_abc,
+        )
         min_alignment, mean_alignment = _frame_normal_alignment(self.tool_frames, self.normals)
         tool_direction_text = "toward surface" if self.tool_z_points_toward_surface else "with surface normal"
         print(
@@ -1216,6 +1561,16 @@ class MeshVisualizer:
             f"Path frame ABC offset: {self.path_frame_rotation_abc}. "
             f"TCP/path Z alignment: min={min_alignment:.3f}, mean={mean_alignment:.3f}."
         )
+
+    def _urdf_flange_target_transform(self, face_flange_frame: ToolFrame) -> np.ndarray:
+        return _frame_to_transform(face_flange_frame) @ np.linalg.inv(self.urdf_flange_to_face_flange)
+
+    def _face_flange_from_urdf_transform(self, urdf_flange_transform: np.ndarray) -> ToolFrame:
+        return _tool_frame_from_transform(urdf_flange_transform @ self.urdf_flange_to_face_flange)
+
+    def _tcp_from_urdf_transform(self, urdf_flange_transform: np.ndarray) -> ToolFrame:
+        face_flange_transform = urdf_flange_transform @ self.urdf_flange_to_face_flange
+        return _tool_frame_from_transform(face_flange_transform @ _transform_from_xyzabc(self.tcp_offset_xyzabc))
 
     def generate_frames(self) -> None:
         self.frame_meshes = _axis_meshes(self.wcs_origin, self.axis_length)
@@ -1361,6 +1716,7 @@ class MeshVisualizer:
         plotter = pv.Plotter()
         self._add_rotary_table(plotter)
         plotter.add_mesh(_trimesh_to_pyvista(self.mesh), color="lightgray", show_edges=False)
+        self._add_selected_surface(plotter)
 
         _add_line_meshes(plotter, self.frame_meshes)
         self._add_toolpaths(plotter)
@@ -1368,6 +1724,24 @@ class MeshVisualizer:
         self._add_robot_playback(plotter)
         self._add_pickable_points(plotter)
         return plotter
+
+    def _add_selected_surface(self, plotter: pv.Plotter) -> None:
+        if self.mesh is None or self.selected_surface_face_indices is None:
+            return
+        face_indices = np.asarray(self.selected_surface_face_indices, dtype=int)
+        if len(face_indices) == 0:
+            return
+        selected_faces = np.hstack((np.full((len(face_indices), 1), 3), self.mesh.faces[face_indices]))
+        selected_mesh = pv.PolyData(self.mesh.vertices, selected_faces)
+        plotter.add_mesh(
+            selected_mesh,
+            color="orange",
+            opacity=0.35,
+            show_edges=True,
+            edge_color="black",
+            pickable=False,
+            name="selected_surface_overlay",
+        )
 
     def _add_rotary_table(self, plotter: pv.Plotter) -> None:
         config = self.rotary_table_config
@@ -1427,6 +1801,7 @@ class MeshVisualizer:
             legend_lines.append("TCP frame: X red, Y green, Z blue; point yellow")
         if self.show_static_flange_frames:
             legend_lines.append("Flange frame: X magenta, Y lime, Z cyan; point white")
+        legend_lines.append("Bold animated axes show solved robot TCP/flange frames")
         if self.show_frame_points:
             legend_lines.append("White lines connect TCP to flange")
 
@@ -1444,9 +1819,9 @@ class MeshVisualizer:
 
         axis_length = self.axis_length * 0.6
         marker_radius = max(self.axis_length * 0.08, EPSILON)
-        target_fps = 60.0
-        max_path_keyframes = 420
-        interpolation_steps = 12
+        target_fps = 30.0 if self.fast_playback else 60.0
+        max_path_keyframes = 80 if self.fast_playback else 420
+        interpolation_steps = 2 if self.fast_playback else 12
         stride = max(1, len(self.robot_frames) // max_path_keyframes)
         state = {
             "index": 0,
@@ -1467,7 +1842,16 @@ class MeshVisualizer:
             "animated_tcp_x",
             "animated_tcp_y",
             "animated_tcp_z",
+            "solved_flange_marker",
+            "solved_tcp_marker",
+            "solved_flange_x",
+            "solved_flange_y",
+            "solved_flange_z",
+            "solved_tcp_x",
+            "solved_tcp_y",
+            "solved_tcp_z",
             "animated_tcp_flange_link",
+            "solved_tcp_flange_link",
             "animated_frame_text",
             "animated_pose_text",
             "home_pose_text",
@@ -1518,6 +1902,41 @@ class MeshVisualizer:
         def add_frame_axes(frame: ToolFrame, prefix: str, colors: List[str], width: int) -> None:
             for suffix, mesh, color in zip(("x", "y", "z"), _frame_axis_polydata(frame, axis_length), colors):
                 plotter.add_mesh(mesh, color=color, line_width=width, name=f"{prefix}_{suffix}")
+
+        def add_solved_tcp_flange_frames(pose: SixAxisRobotPose) -> None:
+            flange_transform = pose.transforms[-1]
+            flange_frame = self._face_flange_from_urdf_transform(flange_transform)
+            tcp_frame = self._tcp_from_urdf_transform(flange_transform)
+            solved_axis_length = axis_length * 1.45
+
+            plotter.add_mesh(
+                pv.Sphere(radius=marker_radius * 1.25, center=flange_frame.point),
+                color="white",
+                name="solved_flange_marker",
+            )
+            plotter.add_mesh(
+                pv.Sphere(radius=marker_radius * 1.1, center=tcp_frame.point),
+                color="yellow",
+                name="solved_tcp_marker",
+            )
+            for suffix, mesh, color in zip(
+                ("x", "y", "z"),
+                _frame_axis_polydata(flange_frame, solved_axis_length),
+                ("magenta", "lime", "cyan"),
+            ):
+                plotter.add_mesh(mesh, color=color, line_width=7, name=f"solved_flange_{suffix}")
+            for suffix, mesh, color in zip(
+                ("x", "y", "z"),
+                _frame_axis_polydata(tcp_frame, solved_axis_length * 0.85),
+                ("red", "green", "blue"),
+            ):
+                plotter.add_mesh(mesh, color=color, line_width=6, name=f"solved_tcp_{suffix}")
+            plotter.add_mesh(
+                _line_polydata([np.array([flange_frame.point, tcp_frame.point])]),
+                color="white",
+                line_width=4,
+                name="solved_tcp_flange_link",
+            )
 
         def format_joint_text(joint_angles_deg: np.ndarray) -> str:
             return "\n".join(
@@ -1607,7 +2026,7 @@ class MeshVisualizer:
             )
 
         def flange_xyzabc_from_transform(transform: np.ndarray) -> np.ndarray:
-            frame = _tool_frame_from_transform(transform)
+            frame = self._face_flange_from_urdf_transform(transform)
             x, y, z = frame.point - self.wcs_origin
             a, b, c = _axes_to_rpy(frame.x_axis, frame.y_axis, frame.z_axis)
             return np.array([x, y, z, a, b, c], dtype=float)
@@ -1623,7 +2042,19 @@ class MeshVisualizer:
                 "animated_tcp_x",
                 "animated_tcp_y",
                 "animated_tcp_z",
+                "animated_flange_x",
+                "animated_flange_y",
+                "animated_flange_z",
+                "solved_flange_marker",
+                "solved_tcp_marker",
+                "solved_flange_x",
+                "solved_flange_y",
+                "solved_flange_z",
+                "solved_tcp_x",
+                "solved_tcp_y",
+                "solved_tcp_z",
                 "animated_tcp_flange_link",
+                "solved_tcp_flange_link",
                 "animated_frame_text",
                 "animated_pose_text",
                 "home_pose_text",
@@ -1638,7 +2069,7 @@ class MeshVisualizer:
 
         def machining_start_pose(seed_angles: np.ndarray | None = None) -> SixAxisRobotPose:
             return self.six_axis_robot.solve_ik(
-                _frame_to_transform(self.robot_frames[0].flange),
+                self._urdf_flange_target_transform(self.robot_frames[0].flange),
                 self.six_axis_robot.home_angles if seed_angles is None else seed_angles,
             )
 
@@ -1655,6 +2086,7 @@ class MeshVisualizer:
             clear_lightweight_pose_actors()
             if not add_or_update_visual_robot_pose(pose):
                 add_six_axis_robot_pose(pose)
+            add_solved_tcp_flange_frames(pose)
             plotter.add_text(
                 (
                     "Home position\n"
@@ -1680,6 +2112,7 @@ class MeshVisualizer:
             clear_lightweight_pose_actors()
             if not add_or_update_visual_robot_pose(pose):
                 add_six_axis_robot_pose(pose)
+            add_solved_tcp_flange_frames(pose)
             plotter.add_mesh(
                 pv.Sphere(radius=marker_radius * 1.4, center=robot_frame.tcp.point),
                 color="lime",
@@ -1724,6 +2157,7 @@ class MeshVisualizer:
 
             remove_animation_actors()
             add_six_axis_robot_pose(pose)
+            add_solved_tcp_flange_frames(pose)
             plotter.add_text(
                 (
                     "Robot jog\n"
@@ -1751,12 +2185,17 @@ class MeshVisualizer:
                 self.wcs_origin + np.array([x, y, z], dtype=float),
                 _rpy_to_matrix(a, b, c),
             )
-            pose = self.six_axis_robot.solve_ik(target_transform, self.last_joint_angles)
+            target_frame = _tool_frame_from_transform(target_transform)
+            pose = self.six_axis_robot.solve_ik(
+                self._urdf_flange_target_transform(target_frame),
+                self.last_joint_angles,
+            )
             self.last_joint_angles = pose.joint_angles.copy()
             state["jog_angles_deg"] = np.degrees(pose.joint_angles).copy()
 
             remove_animation_actors()
             add_six_axis_robot_pose(pose)
+            add_solved_tcp_flange_frames(pose)
             plotter.add_text(
                 (
                     "WCS jog\n"
@@ -1790,13 +2229,14 @@ class MeshVisualizer:
             six_axis_pose = None
             if self.show_robot_kinematics:
                 six_axis_pose = self.six_axis_robot.solve_ik(
-                    _frame_to_transform(robot_frame.flange),
+                    self._urdf_flange_target_transform(robot_frame.flange),
                     self.last_joint_angles,
                 )
                 self.last_joint_angles = six_axis_pose.joint_angles.copy()
                 state["jog_angles_deg"] = np.degrees(six_axis_pose.joint_angles).copy()
                 state["wcs_jog_xyzabc"] = flange_xyzabc_from_transform(six_axis_pose.transforms[-1])
                 add_six_axis_robot_pose(six_axis_pose)
+                add_solved_tcp_flange_frames(six_axis_pose)
 
             plotter.add_mesh(
                 pv.Sphere(radius=marker_radius, center=robot_frame.tcp.point),
@@ -1862,8 +2302,12 @@ class MeshVisualizer:
             if not add_or_update_visual_robot_pose(pose):
                 remove_animation_actors()
                 add_six_axis_robot_pose(pose)
+                if not self.fast_playback:
+                    add_solved_tcp_flange_frames(pose)
             else:
                 clear_lightweight_pose_actors()
+                if not self.fast_playback:
+                    add_solved_tcp_flange_frames(pose)
             plotter.add_text(
                 (
                     f"Frame {state['index'] + 1}/{len(self.robot_frames)} | "
@@ -1905,7 +2349,7 @@ class MeshVisualizer:
                 if index == 0:
                     continue
                 target_pose = self.six_axis_robot.solve_ik(
-                    _frame_to_transform(self.robot_frames[index].flange),
+                    self._urdf_flange_target_transform(self.robot_frames[index].flange),
                     previous_angles,
                 )
                 previous_angles = target_pose.joint_angles.copy()
@@ -1914,7 +2358,7 @@ class MeshVisualizer:
             final_index = len(self.robot_frames) - 1
             if trajectory and trajectory[-1][0] != final_index:
                 target_pose = self.six_axis_robot.solve_ik(
-                    _frame_to_transform(self.robot_frames[final_index].flange),
+                    self._urdf_flange_target_transform(self.robot_frames[final_index].flange),
                     previous_angles,
                 )
                 trajectory.append((final_index, target_pose.joint_angles.copy()))
@@ -2150,18 +2594,26 @@ KR10_R1100_HOME_JOINT_ANGLES_DEG = np.array([0.0, -90.0, 90.0, 0.0, 0.0, 0.0], d
 ROTARY_TABLE_CENTER_XYZ = np.array([300.0, 200.0, 200.0], dtype=float)
 ROTARY_TABLE_ANGLE_DEG = 0.0
 
-# Use "top" for only the top section, or "layers" for the old full-height slicing.
-TOOLPATH_MODE = "top"
+# Use "surface" to pick one STL surface first, "top" for top section, or "layers" for full-height slicing.
+TOOLPATH_MODE = "surface"
 TOP_SECTION_OFFSET = 0.5
+SURFACE_SELECTION_NORMAL_ANGLE_DEG = 20.0
+SURFACE_LINE_SPACING = 25.0
+SURFACE_POINT_SPACING = 25.0
 TOOL_Z_POINTS_TOWARD_SURFACE = True
 
 # Local rotation applied to every generated path frame after tangent/normal generation.
 # A rotates about frame X, B about frame Y, C about frame Z, all in degrees.
 PATH_FRAME_ROTATION_ABC = np.array([0.0, 0.0, 180], dtype=float)
 
+# Use the KR10 tool0 fixed link as the practical flange-face/process frame.
+# Its Z axis is normal to the flange surface.
+KR10_FLANGE_FACE_ROTATION_ABC = np.array([0.0, 0.0, 0.0], dtype=float)
+
 # One small Play/Pause button; Stop/Home stay on keyboard shortcuts.
 AUTO_START_SIMULATION = False
 SHOW_PLAYBACK_BUTTONS = True
+FAST_PLAYBACK = True
 
 
 def main() -> None:
@@ -2175,12 +2627,15 @@ def main() -> None:
         toolpath_clearance=50.0,
         toolpath_mode=TOOLPATH_MODE,
         top_section_offset=TOP_SECTION_OFFSET,
+        surface_line_spacing=SURFACE_LINE_SPACING,
+        surface_point_spacing=SURFACE_POINT_SPACING,
         tool_z_points_toward_surface=TOOL_Z_POINTS_TOWARD_SURFACE,
         path_frame_rotation_abc=PATH_FRAME_ROTATION_ABC,
         tcp_offset_xyzabc=np.array([0.0, 0.0, 50, 0, 0.0, 0.0]),
+        flange_face_rotation_abc=KR10_FLANGE_FACE_ROTATION_ABC,
         robot_kinematics_config=SixAxisRobotConfig(
             urdf_path=str(KR10_R1100_URDF_PATH),
-            end_effector_link_name="link_6",
+            end_effector_link_name="tool0",
             active_joint_count=6,
             base_xyzabc=np.array([0, 0, 0, 0.0, 0.0, 0]),
             home_joint_angles_deg=KR10_R1100_HOME_JOINT_ANGLES_DEG,
@@ -2195,12 +2650,29 @@ def main() -> None:
         ),
         show_playback_buttons=SHOW_PLAYBACK_BUTTONS,
         auto_start_playback=AUTO_START_SIMULATION,
+        fast_playback=FAST_PLAYBACK,
         show_static_tcp_frames=True,             #static tcp frame visibility
         show_static_flange_frames=True,          #static flange frame visibility
         show_frame_points=True,                  #frame points visibility
         show_flange_frames=True                  #animated flange frame visibility
     )
 
+    if TOOLPATH_MODE.lower().strip() == "surface":
+        print("Opening surface selection window. Click one face on the STL surface to generate the process path.")
+        selection = select_surface_interactively(
+            visualizer.mesh,
+            normal_angle_deg=SURFACE_SELECTION_NORMAL_ANGLE_DEG,
+        )
+        if selection is None:
+            print("No surface selected. Path generation cancelled.")
+            return
+        visualizer.selected_surface_face_indices = selection.face_indices
+        print(
+            f"Selected surface seed face {selection.seed_face_index}; "
+            f"{len(selection.face_indices)} connected faces."
+        )
+
+    print("Generating selected-surface path and robot frames...")
     visualizer.generate_path_data()
     visualizer.generate_frames()
     visualizer.generate_6dof_data()
@@ -2209,6 +2681,7 @@ def main() -> None:
         visualizer.print_6dof_data_for_index(len(visualizer.toolpath_data) // 2)
 
     print("Simulation controls: Space=play/pause, S=stop, Left/Right=step, H=home, M=machining start.")
+    print("Opening simulation window...")
     visualizer.get_scene().show()
 
 
